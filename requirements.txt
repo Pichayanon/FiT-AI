@@ -1,0 +1,8 @@
+pandas
+numpy
+scikit-learn==1.3.2
+tensorflow==2.12.0
+mediapipe
+opencv-python
+coremltools==6.2
+Flask
