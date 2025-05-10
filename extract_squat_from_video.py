@@ -52,15 +52,29 @@ def extract_squats(video_path, label, writer):
         results = pose.process(image)
 
         if results.pose_landmarks:
-            lm = results.pose_landmarks.landmark
-            keypoints = extract_selected_keypoints(lm)
+            landmarks = results.pose_landmarks.landmark
 
-            hip = [lm[mp_pose.PoseLandmark.LEFT_HIP.value].x, lm[mp_pose.PoseLandmark.LEFT_HIP.value].y]
-            knee = [lm[mp_pose.PoseLandmark.LEFT_KNEE.value].x, lm[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
-            ankle = [lm[mp_pose.PoseLandmark.LEFT_ANKLE.value].x, lm[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
-            angle = calculate_angle(hip, knee, ankle)
+            hip_left = [landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].x,
+                        landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y]
+            knee_left = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x,
+                         landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
+            ankle_left = [landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].x,
+                          landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
+            angle_left = calculate_angle(hip_left, knee_left, ankle_left)
 
-            if angle < 90 and not capturing:
+            hip_right = [landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value].x,
+                         landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value].y]
+            knee_right = [landmarks[mp_pose.PoseLandmark.RIGHT_KNEE.value].x,
+                          landmarks[mp_pose.PoseLandmark.RIGHT_KNEE.value].y]
+            ankle_right = [landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE.value].x,
+                           landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE.value].y]
+            angle_right = calculate_angle(hip_right, knee_right, ankle_right)
+
+            keypoints = extract_selected_keypoints(landmarks)
+
+            angle = min(angle_left, angle_right)
+
+            if angle < 140 and not capturing:
                 capturing = True
                 sequence = []
                 stage = "Down"
@@ -68,7 +82,7 @@ def extract_squats(video_path, label, writer):
             if capturing:
                 sequence.append(keypoints)
 
-            if angle > 160 and stage == "Down" and capturing:
+            if angle > 150 and stage == "Down" and capturing:
                 stage = "Up"
                 capturing = False
 

@@ -6,8 +6,6 @@ from tensorflow.keras.models import load_model
 
 warnings.filterwarnings("ignore")
 
-WINDOW_WIDTH = 1280
-WINDOW_HEIGHT = 720
 SEQ_LENGTH = 30
 FEATURES = 48
 NUM_CLASSES = 2
@@ -52,20 +50,32 @@ def is_fully_visible(results):
     return True
 
 def draw_ui(frame, counter, stage, feedback_msg=None, knee_angle=None):
-    cv2.rectangle(frame, (0, 0), (550, 120), (245, 117, 16), -1)
-    cv2.putText(frame, "REPS", (15, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-    cv2.putText(frame, str(counter), (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 2)
-    cv2.putText(frame, "STAGE", (100, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-    cv2.putText(frame, stage if stage else "", (100, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    h, w = frame.shape[:2]
+    padding = int(w * 0.015)
+    text_y = int(h * 0.05)
+    spacing = int(w * 0.08)
+
+    cv2.rectangle(frame, (0, 0), (int(w * 0.43), int(h * 0.17)), (245, 117, 16), -1)
+
+    cv2.putText(frame, "REPS", (padding, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    cv2.putText(frame, str(counter), (padding, text_y + int(h * 0.08)), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 2)
+
+    cv2.putText(frame, "STAGE", (padding + spacing, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    cv2.putText(frame, stage if stage else "", (padding + spacing, text_y + int(h * 0.08)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+
     if feedback_msg:
-        cv2.putText(frame, feedback_msg, (250, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.putText(frame, feedback_msg, (padding + spacing * 2, text_y + int(h * 0.08)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
     if knee_angle is not None:
-        cv2.putText(frame, f"Knee angle: {int(knee_angle)} deg", (250, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        cv2.putText(frame, f"Knee angle: {int(knee_angle)} deg", (padding + spacing * 2, text_y + int(h * 0.13)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
 
 def main():
-    cap = cv2.VideoCapture(0)
-    cap.set(3, WINDOW_WIDTH)
-    cap.set(4, WINDOW_HEIGHT)
+    video_path = "video/squat_incorrect_2.mp4"
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        print("Error: Cannot open video file.")
+        return
 
     counter = 0
     stage = None
@@ -80,8 +90,9 @@ def main():
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
-                print("Camera not found.")
                 break
+
+            frame_height, frame_width = frame.shape[:2]
 
             image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = pose.process(image)
@@ -91,6 +102,7 @@ def main():
                 try:
                     landmarks = results.pose_landmarks.landmark
 
+                    # LEFT side
                     hip_left = [landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].x,
                                 landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y]
                     knee_left = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x,
@@ -99,6 +111,7 @@ def main():
                                   landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value].y]
                     angle_left = calculate_angle(hip_left, knee_left, ankle_left)
 
+                    # RIGHT side
                     hip_right = [landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value].x,
                                  landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value].y]
                     knee_right = [landmarks[mp_pose.PoseLandmark.RIGHT_KNEE.value].x,
@@ -107,7 +120,9 @@ def main():
                                    landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE.value].y]
                     angle_right = calculate_angle(hip_right, knee_right, ankle_right)
 
+                    # Take the smaller angle (deeper squat)
                     knee_angle = min(angle_left, angle_right)
+
                     keypoints = extract_selected_keypoints(landmarks)
 
                     if knee_angle < 140 and not capturing:
@@ -127,7 +142,7 @@ def main():
                             while len(sequence) < SEQ_LENGTH:
                                 sequence.append(sequence[-1])
                             input_data = np.array(sequence[:SEQ_LENGTH]).reshape(1, SEQ_LENGTH, FEATURES)
-                            pred = model.predict(input_data, verbose=0)[0]  # softmax returns array
+                            pred = model.predict(input_data, verbose=0)[0]
                             predicted_class = np.argmax(pred)
                             print(pred, "-> class:", predicted_class)
 
@@ -146,13 +161,15 @@ def main():
                                       mp_drawing.DrawingSpec(color=(0, 0, 0), thickness=3, circle_radius=4),
                                       mp_drawing.DrawingSpec(color=(0, 0, 0), thickness=3, circle_radius=3))
 
-            cv2.imshow("Squat Checker", image)
+            scale_factor = 1280 / frame_width
+            display_frame = cv2.resize(image, (int(frame_width * scale_factor), int(frame_height * scale_factor)))
+
+            cv2.imshow("Squat Checker (Video)", display_frame)
             if cv2.waitKey(10) & 0xFF == ord("q"):
                 break
 
     cap.release()
     cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()
