@@ -8,17 +8,15 @@ from tensorflow.keras.optimizers import Adam
 SEQ_LENGTH = 30
 FEATURES = 48
 
-
 def load_data(csv_path):
     df = pd.read_csv(csv_path, header=None)
     X = df.iloc[:, :-1].values.reshape(-1, SEQ_LENGTH, FEATURES)
     y = df.iloc[:, -1].values
     return X, y
 
-
 def build_tcn_model():
     model = Sequential([
-        Input(shape=(SEQ_LENGTH, FEATURES)),
+        Input(shape=(SEQ_LENGTH, FEATURES), name="input_layer"),
         Conv1D(64, kernel_size=3, activation='relu'),
         Dropout(0.3),
         Conv1D(128, kernel_size=3, activation='relu'),
@@ -26,13 +24,16 @@ def build_tcn_model():
         Dense(64, activation='relu'),
         Dense(1, activation='sigmoid')
     ])
-    model.compile(optimizer=Adam(learning_rate=0.001), loss='binary_crossentropy', metrics=['accuracy'])
+    model.compile(
+        optimizer=Adam(learning_rate=0.001),
+        loss='binary_crossentropy',
+        metrics=['accuracy']
+    )
     return model
-
 
 if __name__ == "__main__":
     X, y = load_data("squat_data.csv")
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.7, random_state=1900)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.4, random_state=1900)
 
     model = build_tcn_model()
     model.fit(X_train, y_train, epochs=20, batch_size=16, validation_data=(X_test, y_test))
