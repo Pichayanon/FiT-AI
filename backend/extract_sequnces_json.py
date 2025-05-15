@@ -62,7 +62,7 @@ def save_sequence_as_json(sequence, output_path):
 
 if __name__ == "__main__":
     input_folder = "video"
-    output_folder = "json_sequences"
+    output_folder = "samples_data"
     os.makedirs(output_folder, exist_ok=True)
 
     for file in os.listdir(input_folder):
