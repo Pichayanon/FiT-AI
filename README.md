@@ -59,7 +59,7 @@ Once the server is running:
   - A confidence score (between 0.0 and 1.0)
 ---
 
-## Running iOS Application steps
+## Running iOS Application
 Open the .xcworkspace or .xcodeproj file using Xcode, and:
 
 - Select a simulator device (e.g., iPhone 16)
