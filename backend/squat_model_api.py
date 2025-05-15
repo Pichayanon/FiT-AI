@@ -10,7 +10,6 @@ app = Flask(__name__)
 def predict():
     try:
         data = request.get_json()
-
         if "sequence" not in data:
             return jsonify({"error": "Missing 'sequence' key in JSON payload"}), 400
 
@@ -23,10 +22,14 @@ def predict():
         sequence_np = sequence_np.reshape(1, 30, 48)
         prediction = model.predict(sequence_np)[0][0]
 
+        print(f"prediction: {int(prediction > 0.5)}")
+        print(f"confidence: {float(prediction)}")
+              
         return jsonify({
             "prediction": int(prediction > 0.5),
             "confidence": float(prediction)
         })
+
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500

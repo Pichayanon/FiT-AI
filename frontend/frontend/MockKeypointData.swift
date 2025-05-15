@@ -1,7 +1,19 @@
 import Foundation
 
+func loadMockSequence(from filename: String) -> [[Float]] {
+    guard let url = Bundle.main.url(forResource: filename, withExtension: "json"),
+          let data = try? Data(contentsOf: url),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let sequence = json["sequence"] as? [[Double]] else {
+        print("Failed to load or parse \(filename).json")
+        return []
+    }
+    return sequence.map { $0.map { Float($0) } }
+}
+
 let mockSequences: [[[Float]]] = [
-    Array(repeating: Array(repeating: 0.1, count: 48), count: 30),
-    Array(repeating: Array(repeating: 0.5, count: 48), count: 30),
-    Array(repeating: Array(repeating: 0.9, count: 48), count: 30)
+    loadMockSequence(from: "squat_correct_1"),
+    loadMockSequence(from: "squat_correct_2"),
+    loadMockSequence(from: "squat_incorrect_1"),
+    loadMockSequence(from: "squat_incorrect_2"),
 ]
