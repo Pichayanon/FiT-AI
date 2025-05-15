@@ -12,9 +12,9 @@ However, this current version can only detect squat workouts and only classify w
 ```
 git clone https://github.com/Pichayanon/FiT-AI.git
 ```
-### 2. Navigate to the backend 
+### 2. Navigate to the FiT-AI backend 
 ```
-cd backend
+cd FiT-AI/backend/
 ```
 ### 3. Set up a virtual environment
 - mac/linux
