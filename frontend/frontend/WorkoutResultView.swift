@@ -23,7 +23,6 @@ struct WorkoutResultView: View {
             }
 
             Spacer()
-
             Button("Back to Home") {
                 presentationMode.wrappedValue.dismiss()
             }
