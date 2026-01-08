@@ -12,8 +12,9 @@ struct WorkoutSessionView: View {
     @State private var startTime = Date()
     @State private var navigateToResult = false
     @State private var isSessionRunning = false
-    @State private var timer: Timer?
 
+    private let wsURL = "ws://IP:5050/ws/video"
+    
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -23,7 +24,7 @@ struct WorkoutSessionView: View {
                         .clipped()
                         .cornerRadius(12)
                         .overlay(
-                            Text("Camera Live Preview")
+                            Text(isSessionRunning ? "Streaming..." : "Camera Live Preview")
                                 .foregroundColor(.white)
                                 .padding(6)
                                 .background(Color.black.opacity(0.5))
@@ -51,6 +52,12 @@ struct WorkoutSessionView: View {
                         RepCard(title: "Incorrect", value: "\(incorrectReps)", color: .red)
                     }
 
+                    if let err = cameraManager.lastError {
+                        Text("Error: \(err)")
+                            .foregroundColor(.red)
+                            .font(.caption)
+                    }
+
                     if isSessionRunning {
                         Button("End Session") {
                             stopSession()
@@ -70,13 +77,24 @@ struct WorkoutSessionView: View {
                         .cornerRadius(12)
                     }
 
-                    Spacer()
-                        .frame(height: 36)
+                    Spacer().frame(height: 36)
                 }
                 .padding()
             }
             .background(Color.black.edgesIgnoringSafeArea(.all))
             .navigationTitle("Workout")
+            .onAppear {
+                cameraManager.startSession()
+
+                // รับข้อความจาก backend แล้วอัปเดต UI
+                cameraManager.onBackendMessage = { text in
+                    handleBackendMessage(text)
+                }
+            }
+            .onDisappear {
+                stopSession()
+                cameraManager.stopSession()
+            }
             .navigationDestination(isPresented: $navigateToResult) {
                 WorkoutResultView(
                     totalReps: totalReps,
@@ -90,68 +108,45 @@ struct WorkoutSessionView: View {
         }
     }
 
-    func startSession() {
+    private func startSession() {
         isSessionRunning = true
-        cameraManager.resetSequence()
-        timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { _ in
-            sendToAPI(sequence: cameraManager.keypointSequence)
-            cameraManager.resetSequence()
-        }
+        startTime = Date()
+        feedback = "Streaming to backend..."
+        totalReps = 0
+        correctReps = 0
+        incorrectReps = 0
+
+        cameraManager.startStreaming(to: wsURL)
     }
 
-    func stopSession() {
+    private func stopSession() {
         isSessionRunning = false
-        timer?.invalidate()
-        timer = nil
+        cameraManager.stopStreaming()
     }
 
-    func sendToAPI(sequence: [[Float]]) {
-        guard let url = URL(string: "http://127.0.0.1:5050/predict") else {
-            print("Invalid URL")
+    private func handleBackendMessage(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return
         }
 
-        let payload = ["sequence": sequence]
+        let type = obj["type"] as? String ?? ""
+        if type == "result" {
+            let fb = obj["feedback"] as? String ?? "..."
+            let t = obj["totalReps"] as? Int ?? totalReps
+            let c = obj["correctReps"] as? Int ?? correctReps
+            let ic = obj["incorrectReps"] as? Int ?? incorrectReps
 
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
-            print("Failed to encode sequence")
-            return
+            DispatchQueue.main.async {
+                feedback = fb
+                totalReps = t
+                correctReps = c
+                incorrectReps = ic
+            }
+        } else if type == "info" {
+            let msg = obj["message"] as? String ?? "..."
+            DispatchQueue.main.async { feedback = msg }
         }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = jsonData
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                print("Request failed:", error)
-                return
-            }
-
-            guard let data = data else {
-                print("No data received")
-                return
-            }
-
-            if let result = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-               let prediction = result["prediction"] as? Int,
-               let confidence = result["confidence"] as? Float {
-
-                DispatchQueue.main.async {
-                    totalReps += 1
-                    if prediction == 1 {
-                        correctReps += 1
-                        feedback = "Good form! Confidence: \(String(format: "%.2f", confidence))"
-                    } else {
-                        incorrectReps += 1
-                        feedback = "Try adjusting posture. Confidence: \(String(format: "%.2f", confidence))"
-                    }
-                }
-            } else {
-                print("Failed to parse response")
-            }
-        }.resume()
     }
 }
 
