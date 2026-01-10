@@ -245,9 +245,17 @@ def extract_frame_features_from_result(res, side: str) -> Optional[np.ndarray]:
     toe_x = lm[TOE].x
 
     knee_angle = angle(hip, knee, ankle)
-    knee_forward = abs(float(knee[0] - toe_x))
 
-    return np.array([knee_angle, 0.0, knee_forward, 0.0, knee_forward], dtype=np.float32)
+    leg_len = np.linalg.norm(
+        np.array(hip) - np.array(ankle)
+    ) + 1e-6
+
+    knee_forward_norm = abs(knee[0] - toe_x) / leg_len
+
+    return np.array(
+        [knee_angle, 0.0, knee_forward_norm, 0.0, knee_forward_norm],
+        dtype=np.float32
+    )
 
 
 def aggregate_window_features(frame_feats: List[np.ndarray]) -> np.ndarray:
