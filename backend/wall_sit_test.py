@@ -11,25 +11,16 @@ LABELS = {0: "correct", 1: "feet_too_close"}
 # -----------------------------
 # Utils
 # -----------------------------
-def angle(a, b, c):
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    ba, bc = a - b, c - b
-    cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
-    return np.degrees(np.arccos(np.clip(cos, -1, 1)))
+
 
 mp_pose = mp.solutions.pose
 
-def extract_features(video_path: str):
+def extract_features(video_path):
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise FileNotFoundError(f"OpenCV can't open video: {video_path}")
+    pose = mp_pose.Pose()
+    foot_wall_values = []
 
-    pose = mp_pose.Pose(static_image_mode=False)
-
-    knee_angles = []
-    knee_forward = []
-
-    while True:
+    while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
@@ -40,32 +31,40 @@ def extract_features(video_path: str):
             continue
 
         lm = res.pose_landmarks.landmark
+        # Decide which side is facing camera
+        is_right_view = (
+                lm[mp_pose.PoseLandmark.RIGHT_HIP].visibility >
+                lm[mp_pose.PoseLandmark.LEFT_HIP].visibility
+        )
 
-        hip = [lm[mp_pose.PoseLandmark.RIGHT_HIP].x,
-               lm[mp_pose.PoseLandmark.RIGHT_HIP].y]
-        knee = [lm[mp_pose.PoseLandmark.RIGHT_KNEE].x,
-                lm[mp_pose.PoseLandmark.RIGHT_KNEE].y]
-        ankle = [lm[mp_pose.PoseLandmark.RIGHT_ANKLE].x,
-                 lm[mp_pose.PoseLandmark.RIGHT_ANKLE].y]
-        toe_x = lm[mp_pose.PoseLandmark.RIGHT_FOOT_INDEX].x
+        if is_right_view:
+            hip = lm[mp_pose.PoseLandmark.RIGHT_HIP]
+            ankle = lm[mp_pose.PoseLandmark.RIGHT_ANKLE]
+        else:
+            hip = lm[mp_pose.PoseLandmark.LEFT_HIP]
+            ankle = lm[mp_pose.PoseLandmark.LEFT_ANKLE]
 
-        knee_ang = angle(hip, knee, ankle)
-        forward = knee[0] - toe_x
+        # Foot to wall distance (horizontal)
+        foot_wall_dist = abs(ankle.x - hip.x)
 
-        knee_angles.append(knee_ang)
-        knee_forward.append(forward)
+        # Normalize by shoulder width (scale invariant)
+        shoulder_width = abs(
+            lm[mp_pose.PoseLandmark.LEFT_SHOULDER].x -
+            lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].x
+        )
+
+        foot_wall_norm = foot_wall_dist / (shoulder_width + 1e-6)
+        foot_wall_values.append(foot_wall_norm)
 
     cap.release()
 
-    if len(knee_angles) == 0:
-        raise RuntimeError("No pose landmarks detected. Try better lighting / full body in frame.")
+    if len(foot_wall_values) == 0:
+        return None
 
     feat = np.array([
-        np.mean(knee_angles),
-        np.std(knee_angles),
-        np.mean(knee_forward),
-        np.std(knee_forward),
-        np.max(knee_forward),
+        np.mean(foot_wall_values),
+        np.std(foot_wall_values),
+        np.min(foot_wall_values),
     ], dtype=np.float32)
 
     return feat
@@ -89,5 +88,6 @@ def predict(video_path: str, model_path="wall_sit_side_model.pkl"):
 
 
 if __name__ == "__main__":
-    predict("videos/IMG_1362.mov")
-    # predict("videos/IMG_1359.mp4")
+    predict("videos/wall_sit/correct/wallsit_correct_1.mp4")
+    predict("videos/wall_sit/correct/wallsit_correct_2.mp4")
+    predict("videos/wall_sit/feet_too_close/IMG_1359.mov")

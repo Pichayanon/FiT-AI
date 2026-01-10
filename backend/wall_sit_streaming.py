@@ -245,7 +245,7 @@ def extract_frame_features_from_result(res, side: str) -> Optional[np.ndarray]:
     toe_x = lm[TOE].x
 
     knee_angle = angle(hip, knee, ankle)
-    knee_forward = float(knee[0] - toe_x)
+    knee_forward = abs(float(knee[0] - toe_x))
 
     return np.array([knee_angle, 0.0, knee_forward, 0.0, knee_forward], dtype=np.float32)
 
@@ -521,7 +521,11 @@ async def ws_video(websocket: WebSocket):
 
             if res.pose_landmarks:
                 lm = res.pose_landmarks.landmark
-                chosen_side, side_debug = choose_best_side(lm, VIS_TH)
+                if st.ready and st.chosen_side is not None:
+                    chosen_side = st.chosen_side
+                    side_debug = {}
+                else:
+                    chosen_side, side_debug = choose_best_side(lm, VIS_TH)
 
             if (not res.pose_landmarks) or (chosen_side is None):
                 # not OK -> reset gate
