@@ -1,0 +1,501 @@
+"""
+  python extract_bottom_squat.py --video path/to/video.mp4 --label correct --show
+  python extract_bottom_squat.py --video path/to/video.mp4 --label knees_in --show
+"""
+from __future__ import annotations
+
+import argparse
+import os
+from collections import deque
+from dataclasses import dataclass
+from typing import Deque, Dict, List, Optional, Tuple
+
+import cv2
+import mediapipe as mp
+import numpy as np
+
+
+# -----------------------------
+# Small math / pose helpers
+# -----------------------------
+
+def angle_3pts(a: Tuple[float, float], b: Tuple[float, float], c: Tuple[float, float]) -> float:
+    """Compute the angle (in degrees) at point b formed by points a-b-c.
+
+    :param a: point (x, y)
+    :param b: vertex point (x, y)
+    :param c: point (x, y)
+    :returns: angle at b in degrees
+    """
+    a_np = np.array(a, dtype=np.float32)
+    b_np = np.array(b, dtype=np.float32)
+    c_np = np.array(c, dtype=np.float32)
+
+    ba = a_np - b_np
+    bc = c_np - b_np
+
+    denom = (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
+    cosang = np.clip(float(np.dot(ba, bc) / denom), -1.0, 1.0)
+
+    return float(np.degrees(np.arccos(cosang)))
+
+
+def landmarks_to_array(lm) -> np.ndarray:
+    """Convert MediaPipe pose landmarks into a fixed (33, 4) array.
+
+    Output format per landmark:
+      [x, y, z, visibility]
+
+    :param lm: MediaPipe landmarks list (length 33)
+    :returns: numpy array of shape (33, 4), dtype float32
+    """
+    arr = np.zeros((33, 4), dtype=np.float32)
+    for i in range(33):
+        arr[i, 0] = lm[i].x
+        arr[i, 1] = lm[i].y
+        arr[i, 2] = lm[i].z
+        arr[i, 3] = lm[i].visibility
+    return arr
+
+
+def overlay_text(frame: np.ndarray, lines: List[str], x: int = 20, y: int = 30, lh: int = 22) -> None:
+    """Draw multiple lines of text on a frame.
+
+    :param frame: image frame (BGR)
+    :param lines: list of strings to draw
+    :param x: left position
+    :param y: top position
+    :param lh: line height
+    :returns: None
+    """
+    for i, t in enumerate(lines):
+        cv2.putText(
+            frame,
+            t,
+            (x, y + i * lh),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+
+# -----------------------------
+# Bottom detection
+# -----------------------------
+
+class KneeMinimaDetector:
+    """Detect squat bottom using local minima of EMA-smoothed knee angle.
+
+    Rules:
+    - Maintain knee_ema using EMA smoothing.
+    - Keep last 3 knee_ema values; bottom occurs at the middle if:
+        k1 < k0 and k1 < k2
+    - Additional constraints:
+        - k1 <= max_bottom_deg
+        - at least min_gap frames since last event
+
+    :param ema_alpha: EMA alpha (0..1), higher = smoother reacts faster
+    :param max_bottom_deg: only count minima with knee_ema <= this threshold
+    :param min_gap: minimum frames between detections
+    """
+
+    def __init__(self, ema_alpha: float = 0.3, max_bottom_deg: float = 140.0, min_gap: int = 18):
+        self.ema_alpha = float(ema_alpha)
+        self.max_bottom_deg = float(max_bottom_deg)
+        self.min_gap = int(min_gap)
+
+        self.knee_ema: Optional[float] = None
+        self.last_event_frame: int = -10**9
+
+        self.k_hist: Deque[float] = deque(maxlen=3)  # knee_ema history
+        self.f_hist: Deque[int] = deque(maxlen=3)    # matching frame indices
+
+    def update(self, knee_deg: Optional[float], frame_idx: int) -> Tuple[Optional[int], Optional[float]]:
+        """Update detector with the new knee angle value.
+
+        :param knee_deg: raw knee angle in degrees (None if pose not found)
+        :param frame_idx: current frame index
+        :returns: (event_frame, knee_ema)
+                  - event_frame is the detected bottom frame index (or None)
+                  - knee_ema is the current EMA value (or None if never initialized)
+        """
+        if knee_deg is None:
+            return None, self.knee_ema
+
+        k_raw = float(knee_deg)
+
+        if self.knee_ema is None:
+            self.knee_ema = k_raw
+        else:
+            a = self.ema_alpha
+            self.knee_ema = a * k_raw + (1.0 - a) * self.knee_ema
+
+        self.k_hist.append(self.knee_ema)
+        self.f_hist.append(frame_idx)
+
+        if len(self.k_hist) < 3:
+            return None, self.knee_ema
+
+        k0, k1, k2 = self.k_hist[0], self.k_hist[1], self.k_hist[2]
+        f1 = self.f_hist[1]
+
+        # Local minima at middle point.
+        is_min = (k1 < k0) and (k1 < k2)
+
+        if is_min and (k1 <= self.max_bottom_deg) and (f1 - self.last_event_frame >= self.min_gap):
+            self.last_event_frame = f1
+            return f1, self.knee_ema
+
+        return None, self.knee_ema
+
+
+# -----------------------------
+# Snippet capture structures
+# -----------------------------
+
+@dataclass
+class PendingSnippet:
+    """Hold snippet data while we collect post-frames.
+
+    :param snip_id: snippet identifier (used for filenames)
+    :param frames: list of BGR frames (copied)
+    :param kpts: list of keypoint arrays or None (aligned with frames)
+    :param need_post: how many more frames we still need to reach end_frame
+    :param event_frame: bottom event frame
+    :param start_frame: snippet start frame index
+    :param end_frame: snippet end frame index
+    """
+    snip_id: str
+    frames: List[np.ndarray]
+    kpts: List[Optional[np.ndarray]]
+    need_post: int
+    event_frame: int
+    start_frame: int
+    end_frame: int
+
+
+# -----------------------------
+# IO helpers (save mp4 + npz)
+# -----------------------------
+
+def write_snippet_mp4(
+    out_path: str,
+    frames: List[np.ndarray],
+    fps: float,
+    size_wh: Tuple[int, int],
+    label: str,
+    snip_id: str,
+) -> None:
+    """Write a list of frames to an MP4 file.
+
+    :param out_path: output .mp4 path
+    :param frames: list of BGR frames
+    :param fps: frames per second
+    :param size_wh: (W, H)
+    :param label: label text to overlay
+    :param snip_id: snippet id to overlay
+    :returns: None
+    :raises: RuntimeError if VideoWriter fails to open
+    """
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(out_path, fourcc, float(fps), size_wh)
+
+    if not writer.isOpened():
+        raise RuntimeError("Cannot open VideoWriter: " + out_path)
+
+    for f in frames:
+        # Keep overlay consistent with the original behavior.
+        cv2.putText(
+            f,
+            f"{label} | {snip_id}",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        writer.write(f)
+
+    writer.release()
+
+
+def write_snippet_npz(
+    out_path: str,
+    kpts_list: List[Optional[np.ndarray]],
+    label: str,
+    fps: float,
+    event_frame: int,
+    start_frame: int,
+    end_frame: int,
+) -> None:
+    """Write snippet keypoints + metadata into a compressed NPZ file.
+
+    :param out_path: output .npz path
+    :param kpts_list: list of (33, 4) arrays or None (aligned with frames)
+    :param label: snippet label
+    :param fps: video fps
+    :param event_frame: detected bottom frame
+    :param start_frame: snippet start frame index
+    :param end_frame: snippet end frame index
+    :returns: None
+    """
+    T = len(kpts_list)
+    kp_seq = np.zeros((T, 33, 4), dtype=np.float32)
+    mask = np.zeros((T,), dtype=np.float32)
+
+    for i, k in enumerate(kpts_list):
+        if k is not None:
+            kp_seq[i] = k
+            mask[i] = 1.0
+
+    np.savez_compressed(
+        out_path,
+        keypoints=kp_seq,
+        mask=mask,
+        label=label,
+        fps=float(fps),
+        event_frame=int(event_frame),
+        start_frame=int(start_frame),
+        end_frame=int(end_frame),
+    )
+
+
+# -----------------------------
+# Core pipeline
+# -----------------------------
+
+def compute_knee_angle_avg(lm, mp_pose) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Compute average knee angle from MediaPipe landmarks.
+
+    :param lm: MediaPipe landmarks list
+    :param mp_pose: mediapipe pose module (for landmark indices)
+    :returns: (knee_deg_avg, knee_left, knee_right)
+              Any of them can be None if something is missing.
+    """
+    LHIP = mp_pose.PoseLandmark.LEFT_HIP.value
+    RHIP = mp_pose.PoseLandmark.RIGHT_HIP.value
+    LKNEE = mp_pose.PoseLandmark.LEFT_KNEE.value
+    RKNEE = mp_pose.PoseLandmark.RIGHT_KNEE.value
+    LANK = mp_pose.PoseLandmark.LEFT_ANKLE.value
+    RANK = mp_pose.PoseLandmark.RIGHT_ANKLE.value
+
+    lhip = (lm[LHIP].x, lm[LHIP].y)
+    rhip = (lm[RHIP].x, lm[RHIP].y)
+    lknee = (lm[LKNEE].x, lm[LKNEE].y)
+    rknee = (lm[RKNEE].x, lm[RKNEE].y)
+    lank = (lm[LANK].x, lm[LANK].y)
+    rank = (lm[RANK].x, lm[RANK].y)
+
+    knee_l = angle_3pts(lhip, lknee, lank)
+    knee_r = angle_3pts(rhip, rknee, rank)
+    knee_deg = float((knee_l + knee_r) * 0.5)
+
+    return knee_deg, knee_l, knee_r
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Create the CLI argument parser.
+
+    :returns: configured ArgumentParser
+    """
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--video", required=True)
+    ap.add_argument("--label", required=True, choices=["correct", "knees_in"])
+    ap.add_argument("--outdir", default="dataset_bottom")
+    ap.add_argument("--pre", type=int, default=15, help="frames before bottom")
+    ap.add_argument("--post", type=int, default=15, help="frames after bottom")
+    ap.add_argument("--ema_alpha", type=float, default=0.3)
+    ap.add_argument(
+        "--max_bottom_deg",
+        type=float,
+        default=140.0,
+        help="only minima with knee_ema <= this are kept",
+    )
+    ap.add_argument("--min_gap", type=int, default=18)
+    ap.add_argument("--show", action="store_true")
+    return ap
+
+
+def main() -> None:
+    """Run extraction from a video and save bottom snippets.
+
+    :returns: None
+    :raises: RuntimeError if video cannot be opened or writer fails
+    """
+    args = build_arg_parser().parse_args()
+
+    os.makedirs(args.outdir, exist_ok=True)
+    vidname = os.path.splitext(os.path.basename(args.video))[0]
+
+    cap = cv2.VideoCapture(args.video)
+    if not cap.isOpened():
+        raise RuntimeError("Cannot open: " + args.video)
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    mp_pose = mp.solutions.pose
+    mp_draw = mp.solutions.drawing_utils
+
+    det = KneeMinimaDetector(
+        ema_alpha=args.ema_alpha,
+        max_bottom_deg=args.max_bottom_deg,
+        min_gap=args.min_gap,
+    )
+
+    # Keep enough history to build "pre" frames when an event happens.
+    hist_len = args.pre + 60
+    frame_hist: Deque[np.ndarray] = deque(maxlen=hist_len)
+    kpt_hist: Deque[Optional[np.ndarray]] = deque(maxlen=hist_len)
+    idx_hist: Deque[int] = deque(maxlen=hist_len)
+
+    pending: Optional[PendingSnippet] = None
+    snip_count = 0
+
+    with mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=1,
+        enable_segmentation=False,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    ) as pose:
+
+        frame_idx = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            res = pose.process(rgb)
+
+            knee_deg: Optional[float] = None
+            knee_l: Optional[float] = None
+            knee_r: Optional[float] = None
+            kpts: Optional[np.ndarray] = None
+
+            if res.pose_landmarks:
+                lm = res.pose_landmarks.landmark
+                kpts = landmarks_to_array(lm)
+
+                knee_deg, knee_l, knee_r = compute_knee_angle_avg(lm, mp_pose)
+
+                # Draw pose overlay (same as original).
+                mp_draw.draw_landmarks(
+                    frame,
+                    res.pose_landmarks,
+                    mp_pose.POSE_CONNECTIONS,
+                    landmark_drawing_spec=mp_draw.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=2),
+                    connection_drawing_spec=mp_draw.DrawingSpec(color=(255, 255, 255), thickness=2),
+                )
+
+            event_frame, knee_ema = det.update(knee_deg, frame_idx)
+
+            # Push current frame to history (used to collect "pre" frames).
+            frame_hist.append(frame.copy())
+            kpt_hist.append(kpts)
+            idx_hist.append(frame_idx)
+
+            # If we are collecting a snippet, add post frames until done.
+            if pending is not None:
+                pending.frames.append(frame.copy())
+                pending.kpts.append(kpts)
+                pending.need_post -= 1
+
+                if pending.need_post <= 0:
+                    snip_id = pending.snip_id
+                    out_mp4 = os.path.join(args.outdir, snip_id + ".mp4")
+                    out_npz = os.path.join(args.outdir, snip_id + ".npz")
+
+                    write_snippet_mp4(
+                        out_path=out_mp4,
+                        frames=pending.frames,
+                        fps=float(fps),
+                        size_wh=(W, H),
+                        label=args.label,
+                        snip_id=snip_id,
+                    )
+                    write_snippet_npz(
+                        out_path=out_npz,
+                        kpts_list=pending.kpts,
+                        label=args.label,
+                        fps=float(fps),
+                        event_frame=pending.event_frame,
+                        start_frame=pending.start_frame,
+                        end_frame=pending.end_frame,
+                    )
+
+                    print("Saved:", out_mp4)
+                    print("Saved:", out_npz)
+
+                    snip_count += 1
+                    pending = None
+
+            # Start a new snippet when we detect an event and no snippet is pending.
+            if event_frame is not None and pending is None:
+                start_frame = event_frame - args.pre
+                end_frame = event_frame + args.post
+
+                frames_init: List[np.ndarray] = []
+                kpts_init: List[Optional[np.ndarray]] = []
+
+                # History must cover start_frame. If not, we skip this event.
+                if len(idx_hist) > 0 and start_frame >= idx_hist[0]:
+                    for f, k, idx in zip(frame_hist, kpt_hist, idx_hist):
+                        if start_frame <= idx <= frame_idx:
+                            frames_init.append(f.copy())
+                            kpts_init.append(k)
+
+                    need_post = end_frame - frame_idx
+                    if need_post < 0:
+                        # Event is too far back; keep behavior safe (same as original).
+                        need_post = 0
+
+                    snip_id = f"{vidname}_{args.label}_snip{snip_count:03d}"
+                    pending = PendingSnippet(
+                        snip_id=snip_id,
+                        frames=frames_init,
+                        kpts=kpts_init,
+                        need_post=need_post,
+                        event_frame=int(event_frame),
+                        start_frame=int(start_frame),
+                        end_frame=int(end_frame),
+                    )
+
+            # Optional debug window.
+            if args.show:
+                dbg = frame.copy()
+                lines = [
+                    f"label={args.label} frame={frame_idx}",
+                    (
+                        f"knee_raw(avg)={knee_deg:.1f} (L={knee_l:.1f} R={knee_r:.1f})"
+                        if knee_deg is not None
+                        else "knee_raw(avg)=NA"
+                    ),
+                    (f"knee_ema={knee_ema:.1f}" if knee_ema is not None else "knee_ema=NA"),
+                    f"bottom=minima if knee_ema <= {args.max_bottom_deg:.1f}",
+                    f"pre={args.pre} post={args.post} min_gap={args.min_gap}",
+                ]
+                if event_frame is not None:
+                    lines.append(f"EVENT: BOTTOM(minima) at frame {event_frame}")
+
+                overlay_text(dbg, lines, 20, 30, 22)
+                cv2.imshow("extract_bottom_squat", dbg)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
+
+            frame_idx += 1
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+    print(f"Done. Total snippets: {snip_count}")
+    print(f"Output folder: {args.outdir}")
+
+
+if __name__ == "__main__":
+    main()
