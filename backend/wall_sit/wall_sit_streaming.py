@@ -48,7 +48,7 @@ print("### RUNNING FILE:", __file__)
 # -----------------------------
 # Config
 # -----------------------------
-MODEL_PATH = "wall_sit_side_model.pkl"
+MODEL_PATH = "wall_sit/models/wall_sit_side_model.pkl"
 
 LABELS = {
     0: "dataset_correct",

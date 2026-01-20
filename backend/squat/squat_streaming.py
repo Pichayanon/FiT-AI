@@ -49,8 +49,8 @@ from fastapi.middleware.cors import CORSMiddleware
 # -----------------------------
 # Config
 # -----------------------------
-TCN_MODEL_PATH   = "models/squat_knees_in_tcn.pt"   # bottom-event model
-STAND_MODEL_PATH = "models/feet_too_close_tcn.pt"   # standing model
+TCN_MODEL_PATH   = "squat/models/feet_too_close_tcn.pt"   # bottom-event model
+STAND_MODEL_PATH = "squat/models/feet_too_close_tcn.pt"   # standing model
 
 # Feature mode (must match both training checkpoints)
 FEATURE_MODE = "A"   # "A" (111 dims) or "RAW" (132 dims)
