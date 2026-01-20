@@ -1,19 +1,21 @@
 """
 wall_sit_streaming.py
+
 Streaming (WebSocket) + SIDE-VIEW gate (one side only) + Save video per session
 + Overlay pose + PRINT logs + Status to iOS
++ DEDUP RULE: Send {"type":"result"} ONLY when prediction label changes
 
 Run:
   python wall_sit_streaming.py --serve
 
-WS protocol:
+WS protocol (from iOS):
   - {"type":"start"}
   - {"type":"frame","jpeg_b64":"..."}
   - {"type":"stop"}
 
 Server -> iOS:
   - {"type":"status","state":"waiting|warming_up|ready|predicting", ...}
-  - {"type":"result","prediction":"...", "confidence":..., ...}
+  - {"type":"result","prediction":"...", "confidence":..., ...}   (ONLY when changed)
   - {"type":"info","message":"..."}  (optional)
 """
 
@@ -33,7 +35,6 @@ warnings.filterwarnings(
     category=UserWarning,
     module=r"google\.protobuf\.symbol_database"
 )
-
 
 import numpy as np
 import cv2
@@ -56,7 +57,7 @@ LABELS = {
 
 WINDOW_FRAMES = 15          # frames per window
 READY_STREAK_N = 3          # require side landmarks N consecutive frames
-VIS_TH = 0.80               # side landmark visibility threshold (side-view should not be too high)
+VIS_TH = 0.80               # side landmark visibility threshold
 
 DEBUG = True
 
@@ -82,10 +83,11 @@ STATUS_SEND_EVERY_N_FRAMES = 3
 # Choose side mode: "auto" | "left" | "right"
 SIDE_MODE = "auto"
 
+
 # -----------------------------
 # FastAPI
 # -----------------------------
-app = FastAPI(title="FiT-AI WallSit Streaming Backend (Side Gate)")
+app = FastAPI(title="FiT-AI WallSit Streaming Backend (Side Gate + Dedup Result)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -149,6 +151,9 @@ REQ_LM_LABELS = {
 # Utils
 # -----------------------------
 def decode_jpeg_base64(jpeg_b64: str) -> Optional[np.ndarray]:
+    """
+    Decode base64 JPEG to BGR image.
+    """
     try:
         raw = base64.b64decode(jpeg_b64)
         arr = np.frombuffer(raw, np.uint8)
@@ -157,14 +162,10 @@ def decode_jpeg_base64(jpeg_b64: str) -> Optional[np.ndarray]:
         return None
 
 
-def angle(a, b, c) -> float:
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    ba, bc = a - b, c - b
-    cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
-    return float(np.degrees(np.arccos(np.clip(cos, -1, 1))))
-
-
 def label_of(pred: int) -> str:
+    """
+    Map numeric prediction to label.
+    """
     return LABELS.get(int(pred), str(pred))
 
 
@@ -173,7 +174,7 @@ def side_score(lm, side: str, vis_th: float) -> Tuple[bool, float, Dict[str, flo
     returns (ok, avg_visibility, vis_map)
     ok = all side landmarks visibility >= vis_th
     """
-    vis_map = {}
+    vis_map: Dict[str, float] = {}
     ok = True
     vis_sum = 0.0
     for idx in SIDE_LM[side]:
@@ -207,7 +208,6 @@ def choose_best_side(lm, vis_th: float) -> Tuple[Optional[str], Dict[str, Any]]:
         return ("right" if right_ok else None), debug
 
     # auto
-    # If one side passes, choose that. If both pass, choose higher avg. If none pass, None.
     if left_ok and not right_ok:
         return "left", debug
     if right_ok and not left_ok:
@@ -217,60 +217,36 @@ def choose_best_side(lm, vis_th: float) -> Tuple[Optional[str], Dict[str, Any]]:
     return None, debug
 
 
-def extract_frame_features_from_result(res, side: str) -> Optional[np.ndarray]:
+def extract_frame_foot_wall(res, side: str) -> Optional[float]:
     """
-    1-frame feature vector (match trained model)
-    [knee_angle, 0, knee_forward, 0, knee_forward]
-
-    side = "left" or "right"
+    A simple scalar per-frame feature:
+      foot_wall = |ankle.x - hip.x| / shoulder_width
     """
     if not res.pose_landmarks:
         return None
+
     lm = res.pose_landmarks.landmark
 
     if side == "right":
         HIP = mp_pose.PoseLandmark.RIGHT_HIP
-        KNEE = mp_pose.PoseLandmark.RIGHT_KNEE
         ANK = mp_pose.PoseLandmark.RIGHT_ANKLE
-        TOE = mp_pose.PoseLandmark.RIGHT_FOOT_INDEX
     else:
         HIP = mp_pose.PoseLandmark.LEFT_HIP
-        KNEE = mp_pose.PoseLandmark.LEFT_KNEE
         ANK = mp_pose.PoseLandmark.LEFT_ANKLE
-        TOE = mp_pose.PoseLandmark.LEFT_FOOT_INDEX
 
-    hip = [lm[HIP].x, lm[HIP].y]
-    knee = [lm[KNEE].x, lm[KNEE].y]
-    ankle = [lm[ANK].x, lm[ANK].y]
-    toe_x = lm[TOE].x
-
-    knee_angle = angle(hip, knee, ankle)
-
-    leg_len = np.linalg.norm(
-        np.array(hip) - np.array(ankle)
+    shoulder_width = abs(
+        lm[mp_pose.PoseLandmark.LEFT_SHOULDER].x -
+        lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].x
     ) + 1e-6
 
-    knee_forward_norm = abs(knee[0] - toe_x) / leg_len
-
-    return np.array(
-        [knee_angle, 0.0, knee_forward_norm, 0.0, knee_forward_norm],
-        dtype=np.float32
-    )
-
-
-def aggregate_window_features(frame_feats: List[np.ndarray]) -> np.ndarray:
-    knee_angles = [f[0] for f in frame_feats]
-    forwards = [f[2] for f in frame_feats]
-    return np.array([
-        float(np.mean(knee_angles)),
-        float(np.std(knee_angles)),
-        float(np.mean(forwards)),
-        float(np.std(forwards)),
-        float(np.max(forwards)),
-    ], dtype=np.float32)
+    foot_wall = abs(lm[ANK].x - lm[HIP].x) / shoulder_width
+    return float(foot_wall)
 
 
 def create_video_writer(path_no_ext: str, w: int, h: int, fps: float) -> Tuple[Optional[cv2.VideoWriter], str]:
+    """
+    Try mp4 then avi.
+    """
     mp4_path = f"{path_no_ext}.mp4"
     try:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -299,8 +275,11 @@ def draw_pose_overlay(
     side: Optional[str],
     vis_th: float,
     extra_text: Optional[str] = None,
-    pred_text: Optional[str] = None
+    pred_text: Optional[str] = None,
 ) -> np.ndarray:
+    """
+    Draw pose + debug texts onto frame.
+    """
     out = frame_bgr.copy()
     h, w = out.shape[:2]
 
@@ -313,8 +292,7 @@ def draw_pose_overlay(
         )
 
         lm = res.pose_landmarks.landmark
-        # label only side landmarks (or both if side None)
-        indices = []
+        indices: List[int] = []
         if side in ("left", "right"):
             indices = SIDE_LM[side]
         else:
@@ -348,7 +326,7 @@ def draw_pose_overlay(
 @dataclass
 class StreamState:
     started: bool = False
-    frame_feats: List[np.ndarray] = field(default_factory=list)
+    foot_wall_vals: List[float] = field(default_factory=list)
 
     # gate
     ready: bool = False
@@ -369,9 +347,16 @@ class StreamState:
     last_status: str = ""
     status_tick: int = 0
 
-    # last prediction
+    # last prediction (for overlay)
     last_pred_label: str = ""
     last_pred_conf: Optional[float] = None
+
+    # de-dup send (ONLY send result when changed)
+    last_sent_label: str = ""
+    last_sent_conf: Optional[float] = None
+
+    # frame count (misc)
+    frame_count: int = 0
 
 
 # -----------------------------
@@ -383,7 +368,8 @@ def health():
         "status": "ok",
         "model_loaded": MODEL is not None,
         "record_dir": os.path.abspath(RECORD_DIR),
-        "timestamp": int(time.time())
+        "timestamp": int(time.time()),
+        "window_frames": WINDOW_FRAMES,
     }
 
 
@@ -428,8 +414,8 @@ async def ws_video(websocket: WebSocket):
             try:
                 st.writer.release()
                 print(f"[RECORD] STOP recording")
-                print(f"[RECORD]     path   = {st.actual_video_path}")
-                print(f"[RECORD]     frames = {st.saved_frames}")
+                print(f"[RECORD] path   = {st.actual_video_path}")
+                print(f"[RECORD] frames = {st.saved_frames}")
             except Exception as e:
                 print(f"[RECORD] release error: {e}")
         st.writer = None
@@ -453,16 +439,17 @@ async def ws_video(websocket: WebSocket):
             st.actual_video_path = actual_path
             st.saved_frames = 0
 
-            print(f"[RECORD] 🎥 START recording")
-            print(f"[RECORD]     path = {actual_path}")
-            print(f"[RECORD]     size = {w}x{h} @ {RECORD_FPS}fps")
-            print(f"[RECORD]     dir  = {os.path.abspath(RECORD_DIR)}")
+            print(f"[RECORD] START recording")
+            print(f"[RECORD] path = {actual_path}")
+            print(f"[RECORD] size = {w}x{h} @ {RECORD_FPS}fps")
+            print(f"[RECORD]  dir  = {os.path.abspath(RECORD_DIR)}")
 
             await send_info("Recording started", {"video_path": actual_path})
 
     await send_info("WebSocket connected", {"record_dir": os.path.abspath(RECORD_DIR)})
     print(f"[BOOT] record_dir={os.path.abspath(RECORD_DIR)}")
     print(f"[BOOT] side_mode={SIDE_MODE} VIS_TH={VIS_TH} det={MP_MIN_DET_CONF} track={MP_MIN_TRACK_CONF}")
+    print(f"[BOOT] WINDOW_FRAMES={WINDOW_FRAMES}")
 
     if MODEL is None:
         await send_info("Model not loaded (check MODEL_PATH)")
@@ -485,15 +472,15 @@ async def ws_video(websocket: WebSocket):
                 st.session_id = str(int(time.time() * 1000))
                 st.out_path_no_ext = os.path.join(RECORD_DIR, f"session_{st.session_id}")
 
-                print(f"[SESSION] ▶️ START session_id={st.session_id}")
-                print(f"[SESSION]     output base={st.out_path_no_ext}")
+                print(f"[SESSION] START session_id={st.session_id}")
+                print(f"[SESSION] output base={st.out_path_no_ext}")
 
                 await send_info("Start streaming", {"session_id": st.session_id})
                 await send_status("waiting", {"reason": "session_started"}, force=True)
                 continue
 
             if mtype == "stop":
-                print(f"[SESSION] ⏹ STOP session_id={st.session_id}")
+                print(f"[SESSION] STOP session_id={st.session_id}")
                 st.started = False
                 await cleanup_recording()
 
@@ -504,14 +491,20 @@ async def ws_video(websocket: WebSocket):
                 })
                 await send_status("waiting", {"reason": "session_stopped"}, force=True)
 
-                st.frame_feats.clear()
+                # reset gate + buffers
+                st.foot_wall_vals.clear()
                 st.ready = False
                 st.ready_streak = 0
                 st.chosen_side = None
+                st.last_sent_label = ""
+                st.last_sent_conf = None
+                st.frame_count = 0
                 continue
 
             if mtype != "frame" or not st.started:
                 continue
+
+            st.frame_count += 1
 
             frame = decode_jpeg_base64(data.get("jpeg_b64", ""))
             if frame is None:
@@ -521,8 +514,6 @@ async def ws_video(websocket: WebSocket):
             img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             res = pose.process(img_rgb)
 
-            # default state
-            state = "waiting"
             extra = ""
             side_debug = {}
             chosen_side = None
@@ -531,16 +522,19 @@ async def ws_video(websocket: WebSocket):
                 lm = res.pose_landmarks.landmark
                 if st.ready and st.chosen_side is not None:
                     chosen_side = st.chosen_side
-                    side_debug = {}
                 else:
                     chosen_side, side_debug = choose_best_side(lm, VIS_TH)
 
             if (not res.pose_landmarks) or (chosen_side is None):
-                # not OK -> reset gate
+                # not OK -> reset gate + buffers
                 st.ready = False
                 st.ready_streak = 0
                 st.chosen_side = None
-                st.frame_feats.clear()
+                st.foot_wall_vals.clear()
+
+                # IMPORTANT: reset dedup memory so next label can send again after reacquire
+                st.last_sent_label = ""
+                st.last_sent_conf = None
 
                 extra = "No side landmarks yet"
                 await send_status("waiting", {
@@ -551,7 +545,6 @@ async def ws_video(websocket: WebSocket):
                     "window_size": WINDOW_FRAMES,
                     "debug": side_debug if DEBUG else None
                 })
-
             else:
                 # side OK this frame
                 st.ready_streak += 1
@@ -559,7 +552,6 @@ async def ws_video(websocket: WebSocket):
                 extra = f"Side={chosen_side} Streak {st.ready_streak}/{READY_STREAK_N}"
 
                 if not st.ready and st.ready_streak < READY_STREAK_N:
-                    state = "warming_up"
                     await send_status("warming_up", {
                         "chosen_side": chosen_side,
                         "ready_streak": st.ready_streak,
@@ -570,7 +562,12 @@ async def ws_video(websocket: WebSocket):
 
                 if not st.ready and st.ready_streak >= READY_STREAK_N:
                     st.ready = True
-                    st.frame_feats.clear()
+                    st.foot_wall_vals.clear()
+
+                    # reset dedup when first becomes READY
+                    st.last_sent_label = ""
+                    st.last_sent_conf = None
+
                     print(f"[GATE] READY session_id={st.session_id} side={chosen_side}")
                     await send_info("Side landmarks ready", {"session_id": st.session_id, "side": chosen_side})
                     await send_status("ready", {"chosen_side": chosen_side}, force=True)
@@ -590,7 +587,7 @@ async def ws_video(websocket: WebSocket):
                 side=st.chosen_side,
                 vis_th=VIS_TH,
                 extra_text=extra,
-                pred_text=pred_text if pred_text else None
+                pred_text=pred_text if pred_text else None,
             )
 
             # record
@@ -607,36 +604,52 @@ async def ws_video(websocket: WebSocket):
                     if st.saved_frames % PRINT_EVERY_SAVED_FRAMES == 0:
                         print(f"[RECORD] saved_frames={st.saved_frames} path={st.actual_video_path}")
 
-            # Predict only when READY
+            # Predict only when READY and model exists
             if (MODEL is None) or (not st.ready) or (st.chosen_side is None):
                 continue
 
-            feat = extract_frame_features_from_result(res, st.chosen_side)
-            if feat is None:
-                st.frame_feats.clear()
+            fw = extract_frame_foot_wall(res, st.chosen_side)
+            if fw is None:
+                st.foot_wall_vals.clear()
+                await send_status("predicting", {
+                    "chosen_side": st.chosen_side,
+                    "window_fill": 0,
+                    "window_size": WINDOW_FRAMES
+                })
                 continue
 
-            st.frame_feats.append(feat)
+            st.foot_wall_vals.append(fw)
 
             await send_status("predicting", {
                 "chosen_side": st.chosen_side,
-                "window_fill": len(st.frame_feats),
+                "window_fill": len(st.foot_wall_vals),
                 "window_size": WINDOW_FRAMES
             })
 
-            if len(st.frame_feats) >= WINDOW_FRAMES:
-                feats = st.frame_feats[:WINDOW_FRAMES]
-                agg_feat = aggregate_window_features(feats)
+            # Need enough frames for a window
+            if len(st.foot_wall_vals) < WINDOW_FRAMES:
+                continue
 
-                pred = int(MODEL.predict(agg_feat.reshape(1, -1))[0])
-                conf = None
-                if hasattr(MODEL, "predict_proba"):
-                    conf = float(MODEL.predict_proba(agg_feat.reshape(1, -1))[0][pred])
+            # ---- Sliding window prediction (every frame) ----
+            vals = st.foot_wall_vals[-WINDOW_FRAMES:]
 
-                pred_label = label_of(pred)
-                st.last_pred_label = pred_label
-                st.last_pred_conf = conf
+            agg_feat = np.array([
+                np.mean(vals),
+                np.std(vals),
+                np.min(vals),
+            ], dtype=np.float32)
 
+            pred = int(MODEL.predict(agg_feat.reshape(1, -1))[0])
+            conf = None
+            if hasattr(MODEL, "predict_proba"):
+                conf = float(MODEL.predict_proba(agg_feat.reshape(1, -1))[0][pred])
+
+            pred_label = label_of(pred)
+            st.last_pred_label = pred_label
+            st.last_pred_conf = conf
+
+            # ---- DEDUP SEND: send ONLY when label changes ----
+            if pred_label != st.last_sent_label:
                 payload = {
                     "type": "result",
                     "prediction": pred_label,
@@ -645,14 +658,19 @@ async def ws_video(websocket: WebSocket):
                     "session_id": st.session_id,
                     "side": st.chosen_side
                 }
-
                 if DEBUG:
-                    print(f"[PRED] {payload}")
-
+                    print(f"[PRED] (CHANGED) {payload}")
                 await websocket.send_text(json.dumps(payload))
 
-                # non-overlap window
-                st.frame_feats = st.frame_feats[WINDOW_FRAMES:]
+                st.last_sent_label = pred_label
+                st.last_sent_conf = conf
+            else:
+                if DEBUG:
+                    print(f"[PRED] (SKIP) same label={pred_label}")
+
+            # keep list bounded (avoid growing forever)
+            if len(st.foot_wall_vals) > (WINDOW_FRAMES + 60):
+                st.foot_wall_vals = st.foot_wall_vals[-(WINDOW_FRAMES + 60):]
 
     except WebSocketDisconnect:
         print(f"[WS] disconnect session_id={st.session_id}")
