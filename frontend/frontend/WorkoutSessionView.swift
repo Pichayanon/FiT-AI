@@ -1,21 +1,16 @@
 import SwiftUI
 import AVFoundation
 
-// MARK: - SpeechManager
-/// A small text-to-speech helper that:
-/// - configures `AVAudioSession` for spoken feedback
-/// - cleans backend text into a speakable phrase
-/// - rate-limits and de-duplicates speech to avoid spamming
+// MARK: - Speech Manager (คงอยู่ ไม่โดน recreate)
 final class SpeechManager: ObservableObject {
-
     private let speaker = AVSpeechSynthesizer()
     private var lastSpoken: String = ""
     private var lastSpokenAt: Date = .distantPast
 
-    /// Configure audio session so speech is audible in most scenarios.
     func configureAudioSession() {
         do {
             let session = AVAudioSession.sharedInstance()
+            // playback + spokenAudio ช่วยให้เสียงออกแม้ silent หลายกรณี
             try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
             try session.setActive(true)
         } catch {
@@ -23,28 +18,38 @@ final class SpeechManager: ObservableObject {
         }
     }
 
-    /// Clean raw feedback into a short phrase suitable for TTS.
-    /// Removes confidence values, symbols, and converts underscores to spaces.
+    // ✅ ล้างข้อความ: เอาตัวเลข/สัญลักษณ์ confidence ออก
     func cleanForSpeech(_ text: String) -> String {
         var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if let dot = s.firstIndex(of: "•") { s = String(s[..<dot]) }
-        if let paren = s.firstIndex(of: "(") { s = String(s[..<paren]) }
+        // ตัดหลัง "•" (เช่น "knees_in • 0.92")
+        if let dot = s.firstIndex(of: "•") {
+            s = String(s[..<dot])
+        }
 
+        // ตัดหลัง "(" (เช่น "knees_in (0.923)")
+        if let paren = s.firstIndex(of: "(") {
+            s = String(s[..<paren])
+        }
+
+        // เอาตัวเลข/จุด/เปอร์เซ็นต์ ออก
         s = s.replacingOccurrences(
             of: #"[\d\.\%\-\+]+"#,
             with: "",
             options: .regularExpression
         )
 
+        // ปรับ underscore -> เว้นวรรค
         s = s.replacingOccurrences(of: "_", with: " ")
 
+        // เก็บเฉพาะตัวอักษร + เว้นวรรค (รองรับไทย/อังกฤษ)
         s = s.replacingOccurrences(
             of: #"[^A-Za-zก-๙\s]+"#,
             with: "",
             options: .regularExpression
         )
 
+        // จัดช่องว่างซ้ำ
         s = s.replacingOccurrences(
             of: #"\s+"#,
             with: " ",
@@ -54,16 +59,16 @@ final class SpeechManager: ObservableObject {
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Decide whether the cleaned text should be spoken.
+    // ✅ เงื่อนไขว่าจะพูดไหม (กันรัว)
     func shouldSpeak(_ rawText: String) -> Bool {
         let t = rawText.lowercased()
         if t.isEmpty { return false }
-        if t.contains("correct") { return false }
-        if t.contains("hold") { return false }
+        if t.contains("correct") { return false } // ไม่พูดถ้า correct
+        if t.contains("hold") { return false }    // กันพูด "hold..." รัว
+        // "passed" ให้พูดได้
         return true
     }
 
-    /// Speak with de-duplication and rate limiting.
     func speak(
         _ text: String,
         language: String = "en-US",
@@ -73,8 +78,10 @@ final class SpeechManager: ObservableObject {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
 
+        // ✅ กันพูดซ้ำ (ถ้าไม่ได้ allowRepeat)
         if !allowRepeat, clean == lastSpoken { return }
 
+        // กันพูดถี่เกิน (ถ้า minInterval > 0)
         let now = Date()
         if minInterval > 0, now.timeIntervalSince(lastSpokenAt) < minInterval { return }
 
@@ -96,13 +103,14 @@ final class SpeechManager: ObservableObject {
     }
 }
 
-// MARK: - WorkoutSessionView
-/// Runs Wall-sit first, then shows a short Squat preview countdown and auto-switches to Squat.
-/// - Wall-sit: frontend counts 5 seconds of correct hold
-/// - Squat: backend provides rep counts via `reps { total, correct, incorrect }`
+// MARK: - Workout Session (Wall-sit -> show Squat preview 5s -> auto switch to Squat)
 struct WorkoutSessionView: View {
-
     enum Mode { case wallSit, squat }
+
+    // ✅ Backend phases (match Python)
+    private enum BackendPhase: String {
+        case NO_POSE, HAVE_POSE, BUFFERING, INFERENCING
+    }
 
     let setTitle: String
 
@@ -115,35 +123,50 @@ struct WorkoutSessionView: View {
     @State private var startTime = Date()
     @State private var navigateToResult = false
     @State private var isSessionRunning = false
-    @State private var backendState: String = "waiting"
 
+    // ✅ show backend phase on HUD
+    @State private var backendState: String = BackendPhase.NO_POSE.rawValue
+
+    // ✅ Squat speech control
     @State private var squatStandOK: Bool = false
     @State private var squatStarted: Bool = false
     @State private var lastStandOKAt: Date?
     @State private var lastPleaseStartAt: Date = .distantPast
+
     @State private var lastSpokenCorrectReps: Int = 0
 
+    // ✅ Wall-sit hold progress (5s pass) - นับใน Frontend
     @State private var correctSeconds: Double = 0
     @State private var targetSeconds: Double = 5.0
     @State private var passedWallSit: Bool = false
 
+    // ✅ Gate: ต้อง correct 3 ครั้งติดก่อนถึงเริ่มนับเวลา
     @State private var wallSitConsecutiveCorrect: Int = 0
     @State private var wallSitCountingActive: Bool = false
-    @State private var wallSitIsCorrectHold: Bool = false
-
+    @State private var wallSitIsCorrectHold: Bool = false   // ✅ สำคัญ: ให้ Timer นับได้แม้ backend DEDUP
     private let wallSitTick = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+
+    // ✅ Squat idle timer (ยืนเฉยหลัง Stand OK)
     private let squatIdleTick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
+    // ✅ Preview Squat 5s
     @State private var showSquatPreview: Bool = false
     @State private var squatPreviewSeconds: Int = 5
+
+    // ✅ Auto switch control
     @State private var didSwitchToSquat: Bool = false
 
+    // ✅ Squat target: correct 3 reps = finish
     @State private var squatTargetCorrectReps: Int = 3
+
+    // ✅ Current mode (เริ่มจาก wall-sit)
     @State private var mode: Mode = .wallSit
 
+    // ✅ Speech manager
     @StateObject private var speech = SpeechManager()
     private let speechLang = "en-US"
 
+    // ✅ WS endpoints
     private let wsWallSitURL = "ws://172.20.10.5:5050/ws/video"
     private let wsSquatURL   = "ws://172.20.10.5:5051/ws/video"
 
@@ -151,7 +174,10 @@ struct WorkoutSessionView: View {
         mode == .wallSit ? wsWallSitURL : wsSquatURL
     }
 
+    // ปรับ threshold ตามโมเดลจริงของคุณ
     private let wallSitConfThreshold: Double = 0.50
+
+    // เปิด/ปิดปุ่มทดสอบเสียง
     private let showTestVoiceButton = false
 
     private var wallSitProgress01: Double {
@@ -166,6 +192,7 @@ struct WorkoutSessionView: View {
 
     var body: some View {
         ZStack {
+            // ✅ Full-screen camera background
             CameraPreviewView(session: cameraManager.session)
                 .ignoresSafeArea()
 
@@ -188,16 +215,19 @@ struct WorkoutSessionView: View {
                     .padding(.bottom, 10)
             }
 
+            // ✅ Guide overlay (before start)
             if !isSessionRunning {
                 guideCenterOverlay
                     .transition(.opacity)
             }
 
+            // ✅ Squat preview overlay (5s)
             if showSquatPreview {
                 squatPreviewOverlay
                     .transition(.opacity)
             }
 
+            // ✅ Navigation trigger to Result
             NavigationLink(
                 destination: WorkoutResultView(
                     totalReps: totalReps,
@@ -214,6 +244,7 @@ struct WorkoutSessionView: View {
         .toolbar(.hidden, for: .navigationBar)
         .onAppear {
             speech.configureAudioSession()
+
             cameraManager.startSession()
             cameraManager.onBackendMessage = { text in
                 handleBackendMessage(text)
@@ -229,22 +260,25 @@ struct WorkoutSessionView: View {
             guard speech.shouldSpeak(cleaned) else { return }
             speech.speak(cleaned, language: speechLang, minInterval: 1.2)
         }
+        // ✅ นับเวลาเองตอน Hold (แก้ปัญหา backend DEDUP ส่ง result ไม่ถี่)
         .onReceive(wallSitTick) { _ in
             guard isSessionRunning else { return }
             guard mode == .wallSit else { return }
             guard wallSitCountingActive else { return }
             guard !passedWallSit else { return }
             guard wallSitIsCorrectHold else { return }
-            guard !showSquatPreview else { return }
+            guard !showSquatPreview else { return } // ขึ้น preview แล้วไม่ต้องนับต่อ
 
             correctSeconds = min(targetSeconds, correctSeconds + 0.1)
 
             if correctSeconds >= targetSeconds {
                 correctSeconds = targetSeconds
                 passedWallSit = true
-                setFeedbackIfChanged("Passed")
+                setFeedbackIfChanged("Passed ✅")
 
+                // ✅ หยุด stream ระหว่าง preview กันมัน detect ต่อ
                 cameraManager.stopStreaming()
+
                 startSquatPreviewThenSwitch()
             }
         }
@@ -253,9 +287,12 @@ struct WorkoutSessionView: View {
             guard mode == .squat else { return }
             guard squatStandOK else { return }
             guard !squatStarted else { return }
+
             guard let okAt = lastStandOKAt else { return }
 
+            // รอ 2.5 วิ หลัง Stand OK
             if Date().timeIntervalSince(okAt) > 2.5 {
+                // กันพูดรัว (พูดทุก ~3 วิ)
                 if Date().timeIntervalSince(lastPleaseStartAt) > 3.0 {
                     speech.speak("Please start squat", language: speechLang, minInterval: 0)
                     lastPleaseStartAt = Date()
@@ -271,6 +308,7 @@ struct WorkoutSessionView: View {
         }
     }
 
+    // MARK: - Center Guide
     private var guideCenterOverlay: some View {
         VStack(spacing: 12) {
             WallSitGuideOverlayCompact()
@@ -287,6 +325,7 @@ struct WorkoutSessionView: View {
         .padding(.horizontal, 18)
     }
 
+    // MARK: - Squat Preview Overlay
     private var squatPreviewOverlay: some View {
         ZStack {
             Color.black.opacity(0.45).ignoresSafeArea()
@@ -307,6 +346,7 @@ struct WorkoutSessionView: View {
         }
     }
 
+    // MARK: - Bottom Panel
     private var bottomPanel: some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
@@ -395,7 +435,7 @@ struct WorkoutSessionView: View {
     }
 
     private var wallSitTitleText: String {
-        if passedWallSit { return showSquatPreview ? "PASSED (Next: Squat)" : "PASSED (Switching…)" }
+        if passedWallSit { return showSquatPreview ? "PASSED ✅ (Next: Squat)" : "PASSED ✅ (Switching…)" }
         if wallSitCountingActive { return "Hold Correct (5s)" }
         return "Get 3x Correct to start"
     }
@@ -439,32 +479,43 @@ struct WorkoutSessionView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
+    // MARK: - Session Control
     private func startSession() {
         withAnimation(.easeInOut(duration: 0.2)) {
             isSessionRunning = true
         }
 
         startTime = Date()
-        backendState = "starting"
+        backendState = BackendPhase.NO_POSE.rawValue
         feedback = "Streaming to backend..."
 
+        // ✅ reset ALL
         mode = .wallSit
         didSwitchToSquat = false
         passedWallSit = false
 
+        // preview
         showSquatPreview = false
         squatPreviewSeconds = 5
 
+        // reps (จริง ๆ ใช้ตอน squat)
         totalReps = 0
         correctReps = 0
         incorrectReps = 0
         lastSpokenCorrectReps = 0
 
+        // wall-sit progress
         correctSeconds = 0
         targetSeconds = 5.0
         wallSitConsecutiveCorrect = 0
         wallSitCountingActive = false
         wallSitIsCorrectHold = false
+
+        // squat helpers
+        squatStandOK = false
+        squatStarted = false
+        lastStandOKAt = nil
+        lastPleaseStartAt = .distantPast
 
         cameraManager.startStreaming(to: activeWSURL)
         speech.speak("Session started", language: speechLang, minInterval: 0)
@@ -473,7 +524,7 @@ struct WorkoutSessionView: View {
     private func stopSession() {
         isSessionRunning = false
         cameraManager.stopStreaming()
-        backendState = "waiting"
+        backendState = BackendPhase.NO_POSE.rawValue
         speech.stop()
     }
 
@@ -486,6 +537,7 @@ struct WorkoutSessionView: View {
         showSquatPreview = true
         squatPreviewSeconds = 5
 
+        // countdown UI
         for i in 1...5 {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(i)) {
                 if self.showSquatPreview {
@@ -506,23 +558,33 @@ struct WorkoutSessionView: View {
 
         didSwitchToSquat = true
         mode = .squat
-        backendState = "starting"
+        backendState = BackendPhase.NO_POSE.rawValue
         setFeedbackIfChanged("Switching to Squat…")
 
+        // ✅ reset squat counters (เริ่มนับใหม่)
         totalReps = 0
         correctReps = 0
         incorrectReps = 0
         lastSpokenCorrectReps = 0
 
+        // squat helpers
+        squatStandOK = false
+        squatStarted = false
+        lastStandOKAt = nil
+        lastPleaseStartAt = .distantPast
+
+        // กัน wall-sit timer สะสมต่อ
         wallSitCountingActive = false
         wallSitIsCorrectHold = false
 
+        // start squat streaming
         cameraManager.stopStreaming()
         cameraManager.startStreaming(to: activeWSURL)
 
         speech.speak("Switch to squat", language: speechLang, minInterval: 0)
     }
 
+    // MARK: - Backend Message
     private func handleBackendMessage(_ text: String) {
         guard let data = text.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -531,28 +593,59 @@ struct WorkoutSessionView: View {
 
         let type = obj["type"] as? String ?? ""
 
+        if type == "status" {
+            let stateRaw = (obj["state"] as? String ?? BackendPhase.NO_POSE.rawValue).uppercased()
+            let msg = obj["message"] as? String
+
+            DispatchQueue.main.async {
+                self.backendState = stateRaw
+
+                // ✅ IMPORTANT: ถ้า NO_POSE ให้ reset hold/ready ต่าง ๆ (กัน timer นับค้าง)
+                if stateRaw == BackendPhase.NO_POSE.rawValue {
+                    if self.mode == .wallSit {
+                        self.wallSitIsCorrectHold = false
+                        self.wallSitCountingActive = false
+                        self.wallSitConsecutiveCorrect = 0
+                        self.correctSeconds = 0
+                    }
+                }
+
+                if let msg { self.setFeedbackIfChanged(msg) }
+            }
+            return
+        }
+
+        if type == "info" {
+            let msg = obj["message"] as? String ?? "..."
+            DispatchQueue.main.async { self.setFeedbackIfChanged(msg) }
+            return
+        }
+
         if type == "result" {
-            let pred = (obj["prediction"] as? String ?? "...")
+            let predRaw = (obj["prediction"] as? String ?? "...")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
 
             let conf = obj["confidence"] as? Double
 
             DispatchQueue.main.async {
+                // แสดง feedback (อย่าให้รัวเกินไปจน UI ดูสั่น)
                 if let conf {
-                    self.setFeedbackIfChanged("\(pred) • \(String(format: "%.2f", conf))")
+                    self.setFeedbackIfChanged("\(predRaw) • \(String(format: "%.2f", conf))")
                 } else {
-                    self.setFeedbackIfChanged("\(pred)")
+                    self.setFeedbackIfChanged("\(predRaw)")
                 }
 
+                // ✅ WALL-SIT
                 if self.mode == .wallSit {
-                    self.handleWallSitResult(pred: pred, conf: conf)
+                    self.handleWallSitResult(pred: predRaw, conf: conf)
                     return
                 }
 
+                // ✅ SQUAT
                 if self.mode == .squat {
-
-                    if pred == "stand_ok" {
+                    // 1️⃣ STAND OK
+                    if predRaw == "stand_ok" {
                         if !self.squatStandOK {
                             self.squatStandOK = true
                             self.lastStandOKAt = Date()
@@ -561,12 +654,13 @@ struct WorkoutSessionView: View {
                         return
                     }
 
-                    if pred != "stand_ok" && pred != "stand" {
+                    // 2️⃣ START SQUAT (any non-stand phase)
+                    if predRaw != "stand_ok" && predRaw != "stand" {
                         self.squatStarted = true
                     }
 
+                    // 3️⃣ REP UPDATE
                     if let reps = obj["reps"] as? [String: Any] {
-
                         if let total = reps["total"] as? Int {
                             self.totalReps = total
                         }
@@ -592,51 +686,64 @@ struct WorkoutSessionView: View {
             }
             return
         }
-
-        if type == "status" {
-            let state = obj["state"] as? String ?? "..."
-            let msg = obj["message"] as? String
-            DispatchQueue.main.async {
-                self.backendState = state
-                if let msg { self.setFeedbackIfChanged(msg) }
-            }
-            return
-        }
-
-        if type == "info" {
-            let msg = obj["message"] as? String ?? "..."
-            DispatchQueue.main.async { self.setFeedbackIfChanged(msg) }
-            return
-        }
     }
 
+    // MARK: - Wall-sit logic (3x correct gate -> then 5s hold timer)
     private func handleWallSitResult(pred: String, conf: Double?) {
+        // ✅ รองรับ label แบบ dataset_correct / correct / passed ฯลฯ
+        let p = pred.lowercased()
         let c = conf ?? 0.0
-        let isCorrectNow = (pred == "correct") && (c >= wallSitConfThreshold)
 
+        // ถือว่า "correct" ถ้า label มีคำว่า correct และ confidence ผ่าน threshold
+        // (เช่น dataset_correct)
+        let isCorrectNow = p.contains("correct") && c >= wallSitConfThreshold
+
+        // ให้ timer รู้ว่าตอนนี้ correct อยู่ไหม (แม้ backend dedup)
         wallSitIsCorrectHold = isCorrectNow
 
         if passedWallSit { return }
 
+        // ---- Phase 1: ต้องได้ correct 3 ครั้งติดก่อน ----
         if !wallSitCountingActive {
             if isCorrectNow {
-                wallSitCountingActive = true
-                correctSeconds = 0
-                targetSeconds = 5.0
-                speech.speak("OK", language: speechLang, minInterval: 0)
-                setFeedbackIfChanged("Start hold…")
+                wallSitConsecutiveCorrect = min(3, wallSitConsecutiveCorrect + 1)
+
+                // พูดแค่ครั้งแรกที่เริ่มเข้า correct streak
+                if wallSitConsecutiveCorrect == 1 {
+                    speech.speak("OK", language: speechLang, minInterval: 0)
+                }
+
+                // ถึง 3 ครั้งติด => เริ่มนับเวลา
+                if wallSitConsecutiveCorrect >= 3 {
+                    wallSitCountingActive = true
+                    correctSeconds = 0
+                    targetSeconds = 5.0
+                    setFeedbackIfChanged("Start hold…")
+                } else {
+                    setFeedbackIfChanged("Correct \(wallSitConsecutiveCorrect)/3 • Keep holding")
+                }
+            } else {
+                // หลุด correct ก่อนครบ 3 => reset streak
+                if wallSitConsecutiveCorrect != 0 {
+                    wallSitConsecutiveCorrect = 0
+                    setFeedbackIfChanged("Reset • Try again")
+                }
             }
             return
         }
 
+        // ---- Phase 2: กำลังนับเวลา 5s ----
         if !isCorrectNow {
+            // หลุดตอนกำลังนับ => reset ทั้งหมด
             wallSitCountingActive = false
             wallSitIsCorrectHold = false
+            wallSitConsecutiveCorrect = 0
             correctSeconds = 0
             setFeedbackIfChanged("Reset • Hold correct again")
         }
     }
 
+    // MARK: - Helpers
     private func setFeedbackIfChanged(_ newText: String) {
         if feedback != newText {
             feedback = newText
@@ -644,7 +751,7 @@ struct WorkoutSessionView: View {
     }
 }
 
-// MARK: - TopHUD
+// MARK: - Top HUD
 private struct TopHUD: View {
     let isSessionRunning: Bool
     let backendState: String
@@ -714,7 +821,7 @@ private struct TopHUD: View {
     }
 }
 
-// MARK: - WallSitGuideOverlayCompact
+// MARK: - Guide Overlay Compact (Wall-Sit)
 private struct WallSitGuideOverlayCompact: View {
     private let frames = ["wall_01", "wall_02", "wall_03"]
     @State private var idx: Int = 0
@@ -744,9 +851,9 @@ private struct WallSitGuideOverlayCompact: View {
     }
 }
 
-// MARK: - SquatGuideOverlayCompact
+// MARK: - Guide Overlay Compact (Squat)
 private struct SquatGuideOverlayCompact: View {
-    private let frames = ["squat_01", "squat_02", "squat_03"]
+    private let frames = ["squat_01", "squat_02", "squat_03"] // ✅ ใส่รูปใน Assets
     @State private var idx: Int = 0
     private let timer = Timer.publish(every: 1.1, on: .main, in: .common).autoconnect()
 
@@ -774,7 +881,7 @@ private struct SquatGuideOverlayCompact: View {
     }
 }
 
-// MARK: - Progress Bar
+// MARK: - Custom Progress Bar
 private func progressBar(_ progress: Double, height: CGFloat = 10) -> some View {
     GeometryReader { geo in
         ZStack(alignment: .leading) {

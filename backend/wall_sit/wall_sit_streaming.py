@@ -1,12 +1,18 @@
 """
-wall_sit_streaming.py
+wall_sit_streaming_oop.py (NO OVERLAY / NO RECORDING) - OOP VERSION
 
-Streaming (WebSocket) + SIDE-VIEW gate (one side only) + Save video per session
-+ Overlay pose + PRINT logs + Status to iOS
+Streaming (WebSocket) + SIDE-VIEW gate (one side only)
++ PRINT logs + Status to iOS
 + DEDUP RULE: Send {"type":"result"} ONLY when prediction label changes
 
+PHASE (status.state) to iOS:
+  - NO_POSE
+  - HAVE_POSE
+  - BUFFERING
+  - INFERENCING
+
 Run:
-  python wall_sit_streaming.py --serve
+  python wall_sit_streaming_oop.py --serve
 
 WS protocol (from iOS):
   - {"type":"start"}
@@ -14,18 +20,20 @@ WS protocol (from iOS):
   - {"type":"stop"}
 
 Server -> iOS:
-  - {"type":"status","state":"waiting|warming_up|ready|predicting", ...}
+  - {"type":"status","state":"NO_POSE|HAVE_POSE|BUFFERING|INFERENCING", ...}
   - {"type":"result","prediction":"...", "confidence":..., ...}   (ONLY when changed)
   - {"type":"info","message":"..."}  (optional)
 """
 
+from __future__ import annotations
+
+import argparse
+import base64
+import json
 import os
 import time
-import json
-import base64
-import argparse
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import warnings
 
@@ -33,24 +41,23 @@ warnings.filterwarnings(
     "ignore",
     message=r".*SymbolDatabase\.GetPrototype\(\) is deprecated.*",
     category=UserWarning,
-    module=r"google\.protobuf\.symbol_database"
+    module=r"google\.protobuf\.symbol_database",
 )
 
-import numpy as np
 import cv2
 import joblib
 import mediapipe as mp
+import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-print("### RUNNING FILE:", __file__)
 
 # -----------------------------
 # Config
 # -----------------------------
 MODEL_PATH = "wall_sit/models/wall_sit_side_model.pkl"
 
-LABELS = {
+LABELS: Dict[int, str] = {
     0: "dataset_correct",
     1: "dataset_feet_too_close",
 }
@@ -61,21 +68,9 @@ VIS_TH = 0.80               # side landmark visibility threshold
 
 DEBUG = True
 
-# Save video per session
-SAVE_VIDEO = True
-RECORD_DIR = "recordings"
-RECORD_FPS = 10.0
-os.makedirs(RECORD_DIR, exist_ok=True)
-
-# For debugging: record even when not READY
-RECORD_ONLY_WHEN_READY = False
-
 # MediaPipe confidence
 MP_MIN_DET_CONF = 0.80
 MP_MIN_TRACK_CONF = 0.80
-
-# Print record stats every N frames
-PRINT_EVERY_SAVED_FRAMES = 30
 
 # Status to iOS (throttle)
 STATUS_SEND_EVERY_N_FRAMES = 3
@@ -83,11 +78,17 @@ STATUS_SEND_EVERY_N_FRAMES = 3
 # Choose side mode: "auto" | "left" | "right"
 SIDE_MODE = "auto"
 
+# Status phases
+PHASE_NO_POSE = "NO_POSE"
+PHASE_HAVE_POSE = "HAVE_POSE"
+PHASE_BUFFERING = "BUFFERING"
+PHASE_INFERENCING = "INFERENCING"
+
 
 # -----------------------------
-# FastAPI
+# App
 # -----------------------------
-app = FastAPI(title="FiT-AI WallSit Streaming Backend (Side Gate + Dedup Result)")
+app = FastAPI(title="FiT-AI WallSit Streaming Backend (OOP)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -96,228 +97,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# -----------------------------
-# Load model
-# -----------------------------
-try:
-    MODEL = joblib.load(MODEL_PATH)
-    print(f"[MODEL] Loaded: {MODEL_PATH}")
-except Exception as e:
-    MODEL = None
-    print(f"[MODEL] Cannot load model: {e}")
-
-# -----------------------------
-# MediaPipe
-# -----------------------------
-mp_pose = mp.solutions.pose
-mp_drawing = mp.solutions.drawing_utils
-mp_styles = mp.solutions.drawing_styles
-
-# Side landmark sets (only ONE side is required)
-SIDE_LM = {
-    "left": [
-        mp_pose.PoseLandmark.LEFT_SHOULDER,
-        mp_pose.PoseLandmark.LEFT_HIP,
-        mp_pose.PoseLandmark.LEFT_KNEE,
-        mp_pose.PoseLandmark.LEFT_ANKLE,
-        mp_pose.PoseLandmark.LEFT_FOOT_INDEX,
-    ],
-    "right": [
-        mp_pose.PoseLandmark.RIGHT_SHOULDER,
-        mp_pose.PoseLandmark.RIGHT_HIP,
-        mp_pose.PoseLandmark.RIGHT_KNEE,
-        mp_pose.PoseLandmark.RIGHT_ANKLE,
-        mp_pose.PoseLandmark.RIGHT_FOOT_INDEX,
-    ],
-}
-
-# Labels for overlay (optional)
-REQ_LM_LABELS = {
-    mp_pose.PoseLandmark.LEFT_SHOULDER: "L_SHO",
-    mp_pose.PoseLandmark.LEFT_HIP: "L_HIP",
-    mp_pose.PoseLandmark.LEFT_KNEE: "L_KNEE",
-    mp_pose.PoseLandmark.LEFT_ANKLE: "L_ANK",
-    mp_pose.PoseLandmark.LEFT_FOOT_INDEX: "L_FOOT",
-    mp_pose.PoseLandmark.RIGHT_SHOULDER: "R_SHO",
-    mp_pose.PoseLandmark.RIGHT_HIP: "R_HIP",
-    mp_pose.PoseLandmark.RIGHT_KNEE: "R_KNEE",
-    mp_pose.PoseLandmark.RIGHT_ANKLE: "R_ANK",
-    mp_pose.PoseLandmark.RIGHT_FOOT_INDEX: "R_FOOT",
-}
-
-
-# -----------------------------
-# Utils
-# -----------------------------
-def decode_jpeg_base64(jpeg_b64: str) -> Optional[np.ndarray]:
-    """
-    Decode base64 JPEG to BGR image.
-    """
-    try:
-        raw = base64.b64decode(jpeg_b64)
-        arr = np.frombuffer(raw, np.uint8)
-        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    except Exception:
-        return None
-
-
-def label_of(pred: int) -> str:
-    """
-    Map numeric prediction to label.
-    """
-    return LABELS.get(int(pred), str(pred))
-
-
-def side_score(lm, side: str, vis_th: float) -> Tuple[bool, float, Dict[str, float]]:
-    """
-    returns (ok, avg_visibility, vis_map)
-    ok = all side landmarks visibility >= vis_th
-    """
-    vis_map: Dict[str, float] = {}
-    ok = True
-    vis_sum = 0.0
-    for idx in SIDE_LM[side]:
-        v = float(lm[idx].visibility)
-        vis_map[REQ_LM_LABELS.get(idx, str(idx))] = v
-        vis_sum += v
-        if v < vis_th:
-            ok = False
-    avg = vis_sum / max(1, len(SIDE_LM[side]))
-    return ok, avg, vis_map
-
-
-def choose_best_side(lm, vis_th: float) -> Tuple[Optional[str], Dict[str, Any]]:
-    """
-    Choose side based on mode & visibility.
-    - If SIDE_MODE = left/right: enforce that side (must pass)
-    - If auto: pick side with higher avg visibility; must pass vis_th for that side.
-    """
-    left_ok, left_avg, left_map = side_score(lm, "left", vis_th)
-    right_ok, right_avg, right_map = side_score(lm, "right", vis_th)
-
-    debug = {
-        "left_ok": left_ok, "left_avg": round(left_avg, 3), "left_vis": left_map,
-        "right_ok": right_ok, "right_avg": round(right_avg, 3), "right_vis": right_map,
-        "mode": SIDE_MODE,
-    }
-
-    if SIDE_MODE == "left":
-        return ("left" if left_ok else None), debug
-    if SIDE_MODE == "right":
-        return ("right" if right_ok else None), debug
-
-    # auto
-    if left_ok and not right_ok:
-        return "left", debug
-    if right_ok and not left_ok:
-        return "right", debug
-    if left_ok and right_ok:
-        return ("left" if left_avg >= right_avg else "right"), debug
-    return None, debug
-
-
-def extract_frame_foot_wall(res, side: str) -> Optional[float]:
-    """
-    A simple scalar per-frame feature:
-      foot_wall = |ankle.x - hip.x| / shoulder_width
-    """
-    if not res.pose_landmarks:
-        return None
-
-    lm = res.pose_landmarks.landmark
-
-    if side == "right":
-        HIP = mp_pose.PoseLandmark.RIGHT_HIP
-        ANK = mp_pose.PoseLandmark.RIGHT_ANKLE
-    else:
-        HIP = mp_pose.PoseLandmark.LEFT_HIP
-        ANK = mp_pose.PoseLandmark.LEFT_ANKLE
-
-    shoulder_width = abs(
-        lm[mp_pose.PoseLandmark.LEFT_SHOULDER].x -
-        lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].x
-    ) + 1e-6
-
-    foot_wall = abs(lm[ANK].x - lm[HIP].x) / shoulder_width
-    return float(foot_wall)
-
-
-def create_video_writer(path_no_ext: str, w: int, h: int, fps: float) -> Tuple[Optional[cv2.VideoWriter], str]:
-    """
-    Try mp4 then avi.
-    """
-    mp4_path = f"{path_no_ext}.mp4"
-    try:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(mp4_path, fourcc, fps, (w, h))
-        if writer.isOpened():
-            return writer, mp4_path
-    except Exception:
-        pass
-
-    avi_path = f"{path_no_ext}.avi"
-    try:
-        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-        writer = cv2.VideoWriter(avi_path, fourcc, fps, (w, h))
-        if writer.isOpened():
-            return writer, avi_path
-    except Exception:
-        pass
-
-    return None, ""
-
-
-def draw_pose_overlay(
-    frame_bgr: np.ndarray,
-    res,
-    state: str,
-    side: Optional[str],
-    vis_th: float,
-    extra_text: Optional[str] = None,
-    pred_text: Optional[str] = None,
-) -> np.ndarray:
-    """
-    Draw pose + debug texts onto frame.
-    """
-    out = frame_bgr.copy()
-    h, w = out.shape[:2]
-
-    if res.pose_landmarks:
-        mp_drawing.draw_landmarks(
-            out,
-            res.pose_landmarks,
-            mp_pose.POSE_CONNECTIONS,
-            landmark_drawing_spec=mp_styles.get_default_pose_landmarks_style()
-        )
-
-        lm = res.pose_landmarks.landmark
-        indices: List[int] = []
-        if side in ("left", "right"):
-            indices = SIDE_LM[side]
-        else:
-            indices = SIDE_LM["left"] + SIDE_LM["right"]
-
-        for idx in indices:
-            name = REQ_LM_LABELS.get(idx, str(idx))
-            p = lm[idx]
-            if p.visibility < vis_th:
-                continue
-            x, y = int(p.x * w), int(p.y * h)
-            cv2.circle(out, (x, y), 4, (0, 255, 255), -1)
-            cv2.putText(out, name, (x + 6, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
-
-    cv2.putText(out, f"State: {state}", (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    cv2.putText(out, f"Side: {side or '-'}  VIS_TH: {vis_th:.2f}  READY_STREAK: {READY_STREAK_N}",
-                (12, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-    if extra_text:
-        cv2.putText(out, extra_text, (12, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-    if pred_text:
-        cv2.putText(out, pred_text, (12, 102), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-    return out
 
 
 # -----------------------------
@@ -335,19 +114,12 @@ class StreamState:
 
     # session
     session_id: str = ""
-    out_path_no_ext: str = ""
-
-    # recording
-    writer: Optional[cv2.VideoWriter] = None
-    writer_size: Optional[Tuple[int, int]] = None
-    actual_video_path: str = ""
-    saved_frames: int = 0
 
     # status throttle
     last_status: str = ""
     status_tick: int = 0
 
-    # last prediction (for overlay)
+    # last prediction (for memory/logs)
     last_pred_label: str = ""
     last_pred_conf: Optional[float] = None
 
@@ -360,335 +132,580 @@ class StreamState:
 
 
 # -----------------------------
-# Routes
+# Helper Services
 # -----------------------------
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "model_loaded": MODEL is not None,
-        "record_dir": os.path.abspath(RECORD_DIR),
-        "timestamp": int(time.time()),
-        "window_frames": WINDOW_FRAMES,
-    }
+class ModelService:
+    """Loads a sklearn-like model via joblib and provides predict + proba."""
+
+    def __init__(self, model_path: str) -> None:
+        self.model_path = model_path
+        self.model = self._load()
+
+    def _load(self) -> Any:
+        try:
+            m = joblib.load(self.model_path)
+            print(f"[MODEL] Loaded: {self.model_path}")
+            return m
+        except Exception as e:
+            print(f"[MODEL] Cannot load model: {e}")
+            return None
+
+    @property
+    def loaded(self) -> bool:
+        return self.model is not None
+
+    def predict(self, feat: np.ndarray) -> Tuple[int, Optional[float]]:
+        """Return (pred_id, confidence or None)."""
+        if self.model is None:
+            return 0, None
+
+        pred = int(self.model.predict(feat.reshape(1, -1))[0])
+        conf: Optional[float] = None
+        if hasattr(self.model, "predict_proba"):
+            conf = float(self.model.predict_proba(feat.reshape(1, -1))[0][pred])
+        return pred, conf
 
 
-@app.websocket("/ws/video")
-async def ws_video(websocket: WebSocket):
-    await websocket.accept()
+class FrameDecoder:
+    """Decode base64 jpeg string into BGR image."""
 
-    pose = mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=1,
-        enable_segmentation=False,
-        min_detection_confidence=MP_MIN_DET_CONF,
-        min_tracking_confidence=MP_MIN_TRACK_CONF
-    )
+    @staticmethod
+    def decode_jpeg_base64(jpeg_b64: str) -> Optional[np.ndarray]:
+        try:
+            raw = base64.b64decode(jpeg_b64)
+            arr = np.frombuffer(raw, np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            return img
+        except Exception:
+            return None
 
-    st = StreamState()
 
-    async def send_info(msg: str, extra: Optional[Dict[str, Any]] = None):
-        payload = {"type": "info", "message": msg}
+class LabelMapper:
+    """Map class index -> label string."""
+
+    def __init__(self, labels: Dict[int, str]) -> None:
+        self.labels = labels
+
+    def label_of(self, pred_id: int) -> str:
+        return self.labels.get(int(pred_id), str(pred_id))
+
+
+class SideGate:
+    """Side-view gate: chooses a side and checks landmark visibility."""
+
+    def __init__(self, mp_pose: Any, side_mode: str, vis_th: float) -> None:
+        self.mp_pose = mp_pose
+        self.side_mode = side_mode
+        self.vis_th = vis_th
+
+        self.SIDE_LM: Dict[str, List[int]] = {
+            "left": [
+                mp_pose.PoseLandmark.LEFT_SHOULDER,
+                mp_pose.PoseLandmark.LEFT_HIP,
+                mp_pose.PoseLandmark.LEFT_KNEE,
+                mp_pose.PoseLandmark.LEFT_ANKLE,
+                mp_pose.PoseLandmark.LEFT_FOOT_INDEX,
+            ],
+            "right": [
+                mp_pose.PoseLandmark.RIGHT_SHOULDER,
+                mp_pose.PoseLandmark.RIGHT_HIP,
+                mp_pose.PoseLandmark.RIGHT_KNEE,
+                mp_pose.PoseLandmark.RIGHT_ANKLE,
+                mp_pose.PoseLandmark.RIGHT_FOOT_INDEX,
+            ],
+        }
+
+        self.REQ_LM_LABELS: Dict[int, str] = {
+            mp_pose.PoseLandmark.LEFT_SHOULDER: "L_SHO",
+            mp_pose.PoseLandmark.LEFT_HIP: "L_HIP",
+            mp_pose.PoseLandmark.LEFT_KNEE: "L_KNEE",
+            mp_pose.PoseLandmark.LEFT_ANKLE: "L_ANK",
+            mp_pose.PoseLandmark.LEFT_FOOT_INDEX: "L_FOOT",
+            mp_pose.PoseLandmark.RIGHT_SHOULDER: "R_SHO",
+            mp_pose.PoseLandmark.RIGHT_HIP: "R_HIP",
+            mp_pose.PoseLandmark.RIGHT_KNEE: "R_KNEE",
+            mp_pose.PoseLandmark.RIGHT_ANKLE: "R_ANK",
+            mp_pose.PoseLandmark.RIGHT_FOOT_INDEX: "R_FOOT",
+        }
+
+    def side_score(self, lm: List[Any], side: str) -> Tuple[bool, float, Dict[str, float]]:
+        """ok = all side landmarks visibility >= vis_th"""
+        vis_map: Dict[str, float] = {}
+        ok = True
+        vis_sum = 0.0
+
+        for idx in self.SIDE_LM[side]:
+            v = float(lm[idx].visibility)
+            vis_map[self.REQ_LM_LABELS.get(idx, str(idx))] = v
+            vis_sum += v
+            if v < self.vis_th:
+                ok = False
+
+        avg = vis_sum / max(1, len(self.SIDE_LM[side]))
+        return ok, avg, vis_map
+
+    def choose_best_side(self, lm: List[Any]) -> Tuple[Optional[str], Dict[str, Any]]:
+        left_ok, left_avg, left_map = self.side_score(lm, "left")
+        right_ok, right_avg, right_map = self.side_score(lm, "right")
+
+        debug: Dict[str, Any] = {
+            "left_ok": left_ok,
+            "left_avg": round(left_avg, 3),
+            "left_vis": left_map,
+            "right_ok": right_ok,
+            "right_avg": round(right_avg, 3),
+            "right_vis": right_map,
+            "mode": self.side_mode,
+            "vis_th": self.vis_th,
+        }
+
+        if self.side_mode == "left":
+            return ("left" if left_ok else None), debug
+        if self.side_mode == "right":
+            return ("right" if right_ok else None), debug
+
+        # auto
+        if left_ok and not right_ok:
+            return "left", debug
+        if right_ok and not left_ok:
+            return "right", debug
+        if left_ok and right_ok:
+            return ("left" if left_avg >= right_avg else "right"), debug
+
+        return None, debug
+
+
+class FeatureExtractor:
+    """Extract per-frame features used by the model."""
+
+    def __init__(self, mp_pose: Any) -> None:
+        self.mp_pose = mp_pose
+
+    def extract_foot_wall(self, res: Any, side: str) -> Optional[float]:
+        """
+        foot_wall = |ankle.x - hip.x| / shoulder_width
+        """
+        if not res.pose_landmarks:
+            return None
+
+        lm = res.pose_landmarks.landmark
+
+        if side == "right":
+            hip = self.mp_pose.PoseLandmark.RIGHT_HIP
+            ank = self.mp_pose.PoseLandmark.RIGHT_ANKLE
+        else:
+            hip = self.mp_pose.PoseLandmark.LEFT_HIP
+            ank = self.mp_pose.PoseLandmark.LEFT_ANKLE
+
+        shoulder_width = abs(
+            lm[self.mp_pose.PoseLandmark.LEFT_SHOULDER].x
+            - lm[self.mp_pose.PoseLandmark.RIGHT_SHOULDER].x
+        ) + 1e-6
+
+        foot_wall = abs(lm[ank].x - lm[hip].x) / shoulder_width
+        return float(foot_wall)
+
+    @staticmethod
+    def aggregate_window(vals: List[float]) -> np.ndarray:
+        return np.array([np.mean(vals), np.std(vals), np.min(vals)], dtype=np.float32)
+
+
+class DedupSender:
+    """Send result EVERY inference (no dedup)."""
+
+    def __init__(self, debug: bool) -> None:
+        self.debug = debug
+
+    async def maybe_send_result(
+        self,
+        websocket: WebSocket,
+        st: StreamState,
+        pred_label: str,
+        conf: Optional[float],
+        window: int,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "type": "result",
+            "prediction": pred_label,
+            "confidence": round(conf, 3) if conf is not None else None,
+            "window": window,
+            "session_id": st.session_id,
+            "side": st.chosen_side,
+        }
+        if self.debug:
+            print(f"[PRED] {payload}")
+        await websocket.send_text(json.dumps(payload))
+
+        # (optional) เก็บไว้เฉยๆ
+        st.last_sent_label = pred_label
+        st.last_sent_conf = conf
+
+
+class StatusSender:
+    """Send throttled status PHASE to iOS."""
+
+    def __init__(self, every_n_frames: int) -> None:
+        self.every_n_frames = max(1, int(every_n_frames))
+
+    async def send_info(self, websocket: WebSocket, msg: str, extra: Optional[Dict[str, Any]] = None) -> None:
+        payload: Dict[str, Any] = {"type": "info", "message": msg}
         if extra:
             payload.update(extra)
         await websocket.send_text(json.dumps(payload))
 
-    async def send_status(state: str, extra: Optional[Dict[str, Any]] = None, force: bool = False):
-        """
-        waiting | warming_up | ready | predicting
-        """
+    async def send_status(
+        self,
+        websocket: WebSocket,
+        st: StreamState,
+        state: str,
+        extra: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+    ) -> None:
         st.status_tick += 1
+
         if not force:
-            if (st.status_tick % STATUS_SEND_EVERY_N_FRAMES != 0) and (state == st.last_status):
+            if (st.status_tick % self.every_n_frames != 0) and (state == st.last_status):
                 return
 
-        payload = {"type": "status", "state": state, "session_id": st.session_id}
+        payload: Dict[str, Any] = {"type": "status", "state": state, "session_id": st.session_id}
         if extra:
             payload.update(extra)
 
         st.last_status = state
         await websocket.send_text(json.dumps(payload))
 
-    async def cleanup_recording():
-        if st.writer is not None:
-            try:
-                st.writer.release()
-                print(f"[RECORD] STOP recording")
-                print(f"[RECORD] path   = {st.actual_video_path}")
-                print(f"[RECORD] frames = {st.saved_frames}")
-            except Exception as e:
-                print(f"[RECORD] release error: {e}")
-        st.writer = None
-        st.writer_size = None
 
-    async def start_recording_for_frame(frame_bgr: np.ndarray):
-        if not SAVE_VIDEO:
+# -----------------------------
+# Session Handler (OOP)
+# -----------------------------
+class WallSitWebSocketSession:
+    def __init__(
+        self,
+        websocket: WebSocket,
+        model_svc: ModelService,
+        gate: SideGate,
+        feat: FeatureExtractor,
+        labels: LabelMapper,
+        status: StatusSender,
+        dedup: DedupSender,
+        window_frames: int,
+        ready_streak_n: int,
+        debug: bool,
+    ) -> None:
+        self.ws = websocket
+        self.model_svc = model_svc
+        self.gate = gate
+        self.feat = feat
+        self.labels = labels
+        self.status = status
+        self.dedup = dedup
+        self.window_frames = int(window_frames)
+        self.ready_streak_n = int(ready_streak_n)
+        self.debug = debug
+
+        self.st = StreamState()
+
+        self.mp_pose = mp.solutions.pose
+        self.pose = self.mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            enable_segmentation=False,
+            min_detection_confidence=MP_MIN_DET_CONF,
+            min_tracking_confidence=MP_MIN_TRACK_CONF,
+        )
+
+    async def run(self) -> None:
+        await self.ws.accept()
+        await self.status.send_info(self.ws, "WebSocket connected")
+
+        print(f"[BOOT] side_mode={SIDE_MODE} VIS_TH={VIS_TH} det={MP_MIN_DET_CONF} track={MP_MIN_TRACK_CONF}")
+        print(f"[BOOT] WINDOW_FRAMES={self.window_frames} READY_STREAK_N={self.ready_streak_n}")
+        if not self.model_svc.loaded:
+            await self.status.send_info(self.ws, "Model not loaded (check MODEL_PATH)", {"model_path": MODEL_PATH})
+
+        try:
+            while True:
+                msg = await self.ws.receive_text()
+                data = self._parse_json(msg)
+                if data is None:
+                    await self.status.send_info(self.ws, "Invalid JSON")
+                    continue
+
+                mtype = data.get("type")
+                if mtype == "start":
+                    await self._handle_start()
+                elif mtype == "stop":
+                    await self._handle_stop()
+                elif mtype == "frame":
+                    await self._handle_frame(data)
+                else:
+                    # ignore
+                    continue
+
+        except WebSocketDisconnect:
+            print(f"[WS] disconnect session_id={self.st.session_id}")
+            return
+        except Exception as e:
+            print(f"[WS] error: {e}")
+            try:
+                await self.status.send_info(self.ws, f"Server error: {e}")
+            except Exception:
+                pass
             return
 
-        h, w = frame_bgr.shape[:2]
+    def _parse_json(self, msg: str) -> Optional[Dict[str, Any]]:
+        try:
+            obj = json.loads(msg)
+            if isinstance(obj, dict):
+                return obj
+            return None
+        except Exception:
+            return None
 
-        if st.writer is None:
-            writer, actual_path = create_video_writer(st.out_path_no_ext, w, h, RECORD_FPS)
-            if writer is None:
-                print("[RECORD] Failed to create VideoWriter")
-                await send_info("Recording disabled: cannot create VideoWriter")
-                return
+    async def _handle_start(self) -> None:
+        self.st = StreamState(started=True)
+        self.st.session_id = str(int(time.time() * 1000))
+        print(f"[SESSION] START session_id={self.st.session_id}")
 
-            st.writer = writer
-            st.writer_size = (w, h)
-            st.actual_video_path = actual_path
-            st.saved_frames = 0
+        await self.status.send_info(self.ws, "Start streaming", {"session_id": self.st.session_id})
+        await self.status.send_status(self.ws, self.st, PHASE_NO_POSE, {"reason": "session_started"}, force=True)
 
-            print(f"[RECORD] START recording")
-            print(f"[RECORD] path = {actual_path}")
-            print(f"[RECORD] size = {w}x{h} @ {RECORD_FPS}fps")
-            print(f"[RECORD]  dir  = {os.path.abspath(RECORD_DIR)}")
+    async def _handle_stop(self) -> None:
+        print(f"[SESSION] STOP session_id={self.st.session_id}")
+        self.st.started = False
 
-            await send_info("Recording started", {"video_path": actual_path})
+        await self.status.send_info(self.ws, "Stop streaming", {"session_id": self.st.session_id})
+        await self.status.send_status(self.ws, self.st, PHASE_NO_POSE, {"reason": "session_stopped"}, force=True)
 
-    await send_info("WebSocket connected", {"record_dir": os.path.abspath(RECORD_DIR)})
-    print(f"[BOOT] record_dir={os.path.abspath(RECORD_DIR)}")
-    print(f"[BOOT] side_mode={SIDE_MODE} VIS_TH={VIS_TH} det={MP_MIN_DET_CONF} track={MP_MIN_TRACK_CONF}")
-    print(f"[BOOT] WINDOW_FRAMES={WINDOW_FRAMES}")
+        self._reset_gate_and_buffers()
 
-    if MODEL is None:
-        await send_info("Model not loaded (check MODEL_PATH)")
+    def _reset_gate_and_buffers(self) -> None:
+        self.st.foot_wall_vals.clear()
+        self.st.ready = False
+        self.st.ready_streak = 0
+        self.st.chosen_side = None
 
-    try:
-        while True:
-            msg = await websocket.receive_text()
-            try:
-                data = json.loads(msg)
-            except json.JSONDecodeError:
-                await send_info("Invalid JSON")
-                continue
+        # IMPORTANT: reset dedup memory so next label can send again after reacquire
+        self.st.last_sent_label = ""
+        self.st.last_sent_conf = None
+        self.st.last_pred_label = ""
+        self.st.last_pred_conf = None
+        self.st.frame_count = 0
 
-            mtype = data.get("type")
+    async def _handle_frame(self, data: Dict[str, Any]) -> None:
+        if not self.st.started:
+            return
 
-            if mtype == "start":
-                await cleanup_recording()
-                st = StreamState(started=True)
+        self.st.frame_count += 1
 
-                st.session_id = str(int(time.time() * 1000))
-                st.out_path_no_ext = os.path.join(RECORD_DIR, f"session_{st.session_id}")
+        frame = FrameDecoder.decode_jpeg_base64(data.get("jpeg_b64", ""))
+        if frame is None:
+            await self.status.send_info(self.ws, "Decode failed")
+            return
 
-                print(f"[SESSION] START session_id={st.session_id}")
-                print(f"[SESSION] output base={st.out_path_no_ext}")
+        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        res = self.pose.process(img_rgb)
 
-                await send_info("Start streaming", {"session_id": st.session_id})
-                await send_status("waiting", {"reason": "session_started"}, force=True)
-                continue
+        side_debug: Dict[str, Any] = {}
+        chosen_side: Optional[str] = None
 
-            if mtype == "stop":
-                print(f"[SESSION] STOP session_id={st.session_id}")
-                st.started = False
-                await cleanup_recording()
+        # Decide side (or keep locked after READY)
+        if res.pose_landmarks:
+            lm = res.pose_landmarks.landmark
+            if self.st.ready and self.st.chosen_side is not None:
+                chosen_side = self.st.chosen_side
+            else:
+                chosen_side, side_debug = self.gate.choose_best_side(lm)
 
-                await send_info("Stop streaming", {
-                    "session_id": st.session_id,
-                    "video_path": st.actual_video_path,
-                    "saved_frames": st.saved_frames
-                })
-                await send_status("waiting", {"reason": "session_stopped"}, force=True)
-
-                # reset gate + buffers
-                st.foot_wall_vals.clear()
-                st.ready = False
-                st.ready_streak = 0
-                st.chosen_side = None
-                st.last_sent_label = ""
-                st.last_sent_conf = None
-                st.frame_count = 0
-                continue
-
-            if mtype != "frame" or not st.started:
-                continue
-
-            st.frame_count += 1
-
-            frame = decode_jpeg_base64(data.get("jpeg_b64", ""))
-            if frame is None:
-                await send_info("Decode failed")
-                continue
-
-            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            res = pose.process(img_rgb)
-
-            extra = ""
-            side_debug = {}
-            chosen_side = None
-
-            if res.pose_landmarks:
-                lm = res.pose_landmarks.landmark
-                if st.ready and st.chosen_side is not None:
-                    chosen_side = st.chosen_side
-                else:
-                    chosen_side, side_debug = choose_best_side(lm, VIS_TH)
-
-            if (not res.pose_landmarks) or (chosen_side is None):
-                # not OK -> reset gate + buffers
-                st.ready = False
-                st.ready_streak = 0
-                st.chosen_side = None
-                st.foot_wall_vals.clear()
-
-                # IMPORTANT: reset dedup memory so next label can send again after reacquire
-                st.last_sent_label = ""
-                st.last_sent_conf = None
-
-                extra = "No side landmarks yet"
-                await send_status("waiting", {
+        # Gate fail -> reset => NO_POSE
+        if (not res.pose_landmarks) or (chosen_side is None):
+            self._reset_gate_and_buffers()
+            await self.status.send_status(
+                self.ws,
+                self.st,
+                PHASE_NO_POSE,
+                {
                     "chosen_side": None,
                     "ready_streak": 0,
-                    "needed_streak": READY_STREAK_N,
+                    "needed_streak": self.ready_streak_n,
                     "window_fill": 0,
-                    "window_size": WINDOW_FRAMES,
-                    "debug": side_debug if DEBUG else None
-                })
-            else:
-                # side OK this frame
-                st.ready_streak += 1
-                st.chosen_side = chosen_side
-                extra = f"Side={chosen_side} Streak {st.ready_streak}/{READY_STREAK_N}"
-
-                if not st.ready and st.ready_streak < READY_STREAK_N:
-                    await send_status("warming_up", {
-                        "chosen_side": chosen_side,
-                        "ready_streak": st.ready_streak,
-                        "needed_streak": READY_STREAK_N,
-                        "window_fill": 0,
-                        "window_size": WINDOW_FRAMES
-                    })
-
-                if not st.ready and st.ready_streak >= READY_STREAK_N:
-                    st.ready = True
-                    st.foot_wall_vals.clear()
-
-                    # reset dedup when first becomes READY
-                    st.last_sent_label = ""
-                    st.last_sent_conf = None
-
-                    print(f"[GATE] READY session_id={st.session_id} side={chosen_side}")
-                    await send_info("Side landmarks ready", {"session_id": st.session_id, "side": chosen_side})
-                    await send_status("ready", {"chosen_side": chosen_side}, force=True)
-
-            # overlay prediction text (optional)
-            pred_text = ""
-            if st.last_pred_label:
-                if st.last_pred_conf is None:
-                    pred_text = f"Pred: {st.last_pred_label}"
-                else:
-                    pred_text = f"Pred: {st.last_pred_label} ({st.last_pred_conf:.3f})"
-
-            overlay = draw_pose_overlay(
-                frame_bgr=frame,
-                res=res,
-                state=("ready" if st.ready else ("warming_up" if st.ready_streak > 0 else "waiting")),
-                side=st.chosen_side,
-                vis_th=VIS_TH,
-                extra_text=extra,
-                pred_text=pred_text if pred_text else None,
+                    "window_size": self.window_frames,
+                    "debug": side_debug if self.debug else None,
+                },
             )
+            return
 
-            # record
-            should_record = SAVE_VIDEO and ((not RECORD_ONLY_WHEN_READY) or st.ready)
-            if should_record:
-                await start_recording_for_frame(overlay)
-                if st.writer is not None:
-                    tw, th = st.writer_size if st.writer_size else (overlay.shape[1], overlay.shape[0])
-                    if (overlay.shape[1], overlay.shape[0]) != (tw, th):
-                        overlay = cv2.resize(overlay, (tw, th))
-                    st.writer.write(overlay)
-                    st.saved_frames += 1
+        # Side OK this frame
+        self.st.ready_streak += 1
+        self.st.chosen_side = chosen_side
 
-                    if st.saved_frames % PRINT_EVERY_SAVED_FRAMES == 0:
-                        print(f"[RECORD] saved_frames={st.saved_frames} path={st.actual_video_path}")
-
-            # Predict only when READY and model exists
-            if (MODEL is None) or (not st.ready) or (st.chosen_side is None):
-                continue
-
-            fw = extract_frame_foot_wall(res, st.chosen_side)
-            if fw is None:
-                st.foot_wall_vals.clear()
-                await send_status("predicting", {
-                    "chosen_side": st.chosen_side,
+        # Have pose but not ready yet => HAVE_POSE
+        if (not self.st.ready) and (self.st.ready_streak < self.ready_streak_n):
+            await self.status.send_status(
+                self.ws,
+                self.st,
+                PHASE_HAVE_POSE,
+                {
+                    "chosen_side": chosen_side,
+                    "ready_streak": self.st.ready_streak,
+                    "needed_streak": self.ready_streak_n,
                     "window_fill": 0,
-                    "window_size": WINDOW_FRAMES
-                })
-                continue
+                    "window_size": self.window_frames,
+                },
+            )
+            return
 
-            st.foot_wall_vals.append(fw)
+        # First time ready => enter BUFFERING
+        if (not self.st.ready) and (self.st.ready_streak >= self.ready_streak_n):
+            self.st.ready = True
+            self.st.foot_wall_vals.clear()
 
-            await send_status("predicting", {
-                "chosen_side": st.chosen_side,
-                "window_fill": len(st.foot_wall_vals),
-                "window_size": WINDOW_FRAMES
-            })
+            # reset dedup when first becomes READY
+            self.st.last_sent_label = ""
+            self.st.last_sent_conf = None
 
-            # Need enough frames for a window
-            if len(st.foot_wall_vals) < WINDOW_FRAMES:
-                continue
+            print(f"[GATE] READY session_id={self.st.session_id} side={chosen_side}")
+            await self.status.send_info(
+                self.ws,
+                "Side landmarks ready",
+                {"session_id": self.st.session_id, "side": chosen_side},
+            )
+            await self.status.send_status(
+                self.ws,
+                self.st,
+                PHASE_BUFFERING,
+                {"chosen_side": chosen_side, "window_fill": 0, "window_size": self.window_frames},
+                force=True,
+            )
+            # continue to buffering/inferencing in same frame
 
-            # ---- Sliding window prediction (every frame) ----
-            vals = st.foot_wall_vals[-WINDOW_FRAMES:]
+        # If model missing, still report phase but skip inference
+        if (not self.model_svc.loaded) or (not self.st.ready) or (self.st.chosen_side is None):
+            await self.status.send_status(
+                self.ws,
+                self.st,
+                PHASE_BUFFERING,
+                {
+                    "chosen_side": self.st.chosen_side,
+                    "window_fill": len(self.st.foot_wall_vals),
+                    "window_size": self.window_frames,
+                },
+            )
+            return
 
-            agg_feat = np.array([
-                np.mean(vals),
-                np.std(vals),
-                np.min(vals),
-            ], dtype=np.float32)
+        fw = self.feat.extract_foot_wall(res, self.st.chosen_side)
+        if fw is None:
+            self.st.foot_wall_vals.clear()
+            await self.status.send_status(
+                self.ws,
+                self.st,
+                PHASE_BUFFERING,
+                {"chosen_side": self.st.chosen_side, "window_fill": 0, "window_size": self.window_frames},
+            )
+            return
 
-            pred = int(MODEL.predict(agg_feat.reshape(1, -1))[0])
-            conf = None
-            if hasattr(MODEL, "predict_proba"):
-                conf = float(MODEL.predict_proba(agg_feat.reshape(1, -1))[0][pred])
+        self.st.foot_wall_vals.append(fw)
 
-            pred_label = label_of(pred)
-            st.last_pred_label = pred_label
-            st.last_pred_conf = conf
+        # Not enough frames yet => BUFFERING
+        if len(self.st.foot_wall_vals) < self.window_frames:
+            await self.status.send_status(
+                self.ws,
+                self.st,
+                PHASE_BUFFERING,
+                {
+                    "chosen_side": self.st.chosen_side,
+                    "window_fill": len(self.st.foot_wall_vals),
+                    "window_size": self.window_frames,
+                },
+            )
+            return
 
-            # ---- DEDUP SEND: send ONLY when label changes ----
-            if pred_label != st.last_sent_label:
-                payload = {
-                    "type": "result",
-                    "prediction": pred_label,
-                    "confidence": round(conf, 3) if conf is not None else None,
-                    "window": WINDOW_FRAMES,
-                    "session_id": st.session_id,
-                    "side": st.chosen_side
-                }
-                if DEBUG:
-                    print(f"[PRED] (CHANGED) {payload}")
-                await websocket.send_text(json.dumps(payload))
+        # Enough frames => INFERENCING
+        await self.status.send_status(
+            self.ws,
+            self.st,
+            PHASE_INFERENCING,
+            {
+                "chosen_side": self.st.chosen_side,
+                "window_fill": len(self.st.foot_wall_vals),
+                "window_size": self.window_frames,
+            },
+        )
 
-                st.last_sent_label = pred_label
-                st.last_sent_conf = conf
-            else:
-                if DEBUG:
-                    print(f"[PRED] (SKIP) same label={pred_label}")
+        vals = self.st.foot_wall_vals[-self.window_frames :]
+        agg_feat = self.feat.aggregate_window(vals)
 
-            # keep list bounded (avoid growing forever)
-            if len(st.foot_wall_vals) > (WINDOW_FRAMES + 60):
-                st.foot_wall_vals = st.foot_wall_vals[-(WINDOW_FRAMES + 60):]
+        pred_id, conf = self.model_svc.predict(agg_feat)
+        pred_label = self.labels.label_of(pred_id)
 
-    except WebSocketDisconnect:
-        print(f"[WS] disconnect session_id={st.session_id}")
-        await cleanup_recording()
-        return
-    except Exception as e:
-        print(f"[WS] error: {e}")
-        await cleanup_recording()
-        try:
-            await send_info(f"Server error: {e}")
-        except Exception:
-            pass
+        self.st.last_pred_label = pred_label
+        self.st.last_pred_conf = conf
+
+        await self.dedup.maybe_send_result(
+            websocket=self.ws,
+            st=self.st,
+            pred_label=pred_label,
+            conf=conf,
+            window=self.window_frames,
+        )
+
+        # keep list bounded (avoid growing forever)
+        if len(self.st.foot_wall_vals) > (self.window_frames + 60):
+            self.st.foot_wall_vals = self.st.foot_wall_vals[-(self.window_frames + 60):]
+
+
+# -----------------------------
+# Routes
+# -----------------------------
+model_service = ModelService(MODEL_PATH)
+label_mapper = LabelMapper(LABELS)
+
+mp_pose = mp.solutions.pose
+side_gate = SideGate(mp_pose=mp_pose, side_mode=SIDE_MODE, vis_th=VIS_TH)
+feature_extractor = FeatureExtractor(mp_pose=mp_pose)
+
+status_sender = StatusSender(every_n_frames=STATUS_SEND_EVERY_N_FRAMES)
+dedup_sender = DedupSender(debug=DEBUG)
+
+
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "model_loaded": model_service.loaded,
+        "timestamp": int(time.time()),
+        "window_frames": WINDOW_FRAMES,
+        "ready_streak_n": READY_STREAK_N,
+        "vis_th": VIS_TH,
+        "side_mode": SIDE_MODE,
+        "mp_det_conf": MP_MIN_DET_CONF,
+        "mp_track_conf": MP_MIN_TRACK_CONF,
+        "cwd": os.path.abspath("."),
+    }
+
+
+@app.websocket("/ws/video")
+async def ws_video(websocket: WebSocket) -> None:
+    session = WallSitWebSocketSession(
+        websocket=websocket,
+        model_svc=model_service,
+        gate=side_gate,
+        feat=feature_extractor,
+        labels=label_mapper,
+        status=status_sender,
+        dedup=dedup_sender,
+        window_frames=WINDOW_FRAMES,
+        ready_streak_n=READY_STREAK_N,
+        debug=DEBUG,
+    )
+    await session.run()
 
 
 # -----------------------------
 # Main
 # -----------------------------
-def main():
+def main() -> None:
+    """Run server via uvicorn."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--serve", action="store_true", help="Run WebSocket server")
     args = parser.parse_args()
@@ -698,12 +715,13 @@ def main():
 
     if args.serve:
         import uvicorn
+
         uvicorn.run(
             "wall_sit_streaming:app",
             host="0.0.0.0",
             port=5050,
             reload=False,
-            log_level="info"
+            log_level="info",
         )
 
 
