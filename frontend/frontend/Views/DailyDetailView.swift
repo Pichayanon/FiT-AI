@@ -1,26 +1,25 @@
 import SwiftUI
 
 struct DailyDetailView: View {
-    let date: Date
+    @StateObject private var viewModel: DailyDetailViewModel
 
-    let workoutSets: [WorkoutSetSummary] = [
-        .init(name: "Beginner Level 1", timesCompleted: 1, totalCalories: 150),
-        .init(name: "Beginner Level 2", timesCompleted: 1, totalCalories: 120)
-    ]
+    init(date: Date) {
+        _viewModel = StateObject(wrappedValue: DailyDetailViewModel(date: date))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text(date.formatted(.dateTime.weekday().month().day()))
+            Text(viewModel.date.formatted(.dateTime.weekday().month().day()))
                 .font(.title)
                 .foregroundColor(.white)
 
-            Text("Total Burn: \(workoutSets.map { $0.totalCalories }.reduce(0, +)) kcal")
+            Text("Total Burn: \(viewModel.totalCalories) kcal")
                 .font(.headline)
                 .foregroundColor(.orange)
 
             Divider().background(Color.gray)
 
-            ForEach(workoutSets) { set in
+            ForEach(viewModel.workoutSets) { set in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(set.name)
                         .font(.headline)

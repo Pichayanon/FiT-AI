@@ -1,17 +1,15 @@
 import SwiftUI
 
 struct WorkoutDetailView: View {
-    let setTitle: String
-    
-    let exercises: [WorkoutExercise] = [
-        WorkoutExercise(name: "Squat", imageName: "squat", reps: "15 reps"),
-        WorkoutExercise(name: "High Knees", imageName: "highknees", reps: "10 reps"),
-        WorkoutExercise(name: "Mountain Climbers", imageName: "mountain", reps: "20 reps")
-    ]
+    @StateObject private var viewModel: WorkoutDetailViewModel
+
+    init(setTitle: String) {
+        _viewModel = StateObject(wrappedValue: WorkoutDetailViewModel(setTitle: setTitle))
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(setTitle)
+            Text(viewModel.setTitle)
                 .font(.largeTitle)
                 .fontWeight(.bold)
                 .foregroundColor(.white)
@@ -23,7 +21,7 @@ struct WorkoutDetailView: View {
 
             ScrollView {
                 VStack(spacing: 16) {
-                    ForEach(exercises) { exercise in
+                    ForEach(viewModel.exercises) { exercise in
                         ExerciseCard(exercise: exercise)
                     }
                 }
@@ -40,7 +38,7 @@ struct WorkoutDetailView: View {
 //                    .cornerRadius(20)
 //            }
 //            .padding(.bottom, 20)
-            NavigationLink(destination: WorkoutSessionView(setTitle: setTitle)) {
+            NavigationLink(destination: WorkoutSessionView(setTitle: viewModel.setTitle)) {
                 Text("Start Workout")
                     .frame(maxWidth: .infinity)
                     .padding()
@@ -55,14 +53,7 @@ struct WorkoutDetailView: View {
     }
 }
 
-struct WorkoutExercise: Identifiable {
-    let id = UUID()
-    let name: String
-    let imageName: String
-    let reps: String
-}
-
-struct ExerciseCard: View {
+fileprivate struct ExerciseCard: View {
     let exercise: WorkoutExercise
 
     var body: some View {

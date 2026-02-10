@@ -1,13 +1,15 @@
 import SwiftUI
 
 struct HomeView: View {
+    @StateObject private var viewModel = HomeViewModel()
+
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     HStack {
                         VStack(alignment: .leading) {
-                            Text("Hi, Pichayanon")
+                            Text("Hi, \(viewModel.userName)")
                                 .font(.title)
                                 .fontWeight(.bold)
                                 .foregroundColor(Color(.white))
@@ -37,21 +39,13 @@ struct HomeView: View {
                         .foregroundColor(.white)
 
                     VStack(spacing: 16) {
-                        WorkoutSetCard(
-                            title: "Beginner Level 1",
-                            description: "Squat, High Knees, Mountain Climbers",
-                            imageName: "set1"
-                        )
-                        WorkoutSetCard(
-                            title: "Beginner Level 2",
-                            description: "Lunges, Plank, Jumping Jacks",
-                            imageName: "set2"
-                        )
-                        WorkoutSetCard(
-                            title: "Intermediate Level 1",
-                            description: "Burpees, Push-Ups, Jump Squats",
-                            imageName: "set3"
-                        )
+                        ForEach(viewModel.programs) { program in
+                            WorkoutSetCard(
+                                title: program.title,
+                                description: program.description,
+                                imageName: program.imageName
+                            )
+                        }
                     }
 
                     Spacer()
@@ -64,7 +58,7 @@ struct HomeView: View {
     }
 }
 
-struct MenuButton: View {
+fileprivate struct MenuButton: View {
     let icon: String
     let title: String
     var body: some View {
@@ -82,7 +76,7 @@ struct MenuButton: View {
     }
 }
 
-struct WorkoutSetCard: View {
+fileprivate struct WorkoutSetCard: View {
     let title: String
     let description: String
     let imageName: String

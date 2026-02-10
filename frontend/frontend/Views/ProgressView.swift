@@ -2,21 +2,7 @@ import SwiftUI
 import Charts
 
 struct ProgressView: View {
-    let calorieStats: [DailyCalorie] = [
-        .init(date: Date().addingTimeInterval(-6*86400), calories: 120),
-        .init(date: Date().addingTimeInterval(-5*86400), calories: 150),
-        .init(date: Date().addingTimeInterval(-4*86400), calories: 200),
-        .init(date: Date().addingTimeInterval(-3*86400), calories: 180),
-        .init(date: Date().addingTimeInterval(-2*86400), calories: 160),
-        .init(date: Date().addingTimeInterval(-1*86400), calories: 210),
-        .init(date: Date(), calories: 190),
-    ]
-    
-    let workoutSummaries: [WorkoutSetSummary] = [
-        .init(name: "Beginner Level 1", timesCompleted: 3, totalCalories: 450),
-        .init(name: "Beginner Level 2", timesCompleted: 2, totalCalories: 320),
-        .init(name: "Intermediate Level 1", timesCompleted: 1, totalCalories: 200)
-    ]
+    @StateObject private var viewModel = ProgressViewModel()
 
     var body: some View {
         NavigationView {
@@ -28,7 +14,7 @@ struct ProgressView: View {
                         .foregroundColor(.white)
 
                     Chart {
-                        ForEach(calorieStats) { day in
+                        ForEach(viewModel.calorieStats) { day in
                             BarMark(
                                 x: .value("Day", day.date, unit: .day),
                                 y: .value("Calories", day.calories)
@@ -64,7 +50,7 @@ struct ProgressView: View {
                         .font(.headline)
                         .foregroundColor(.white)
 
-                    ForEach(workoutSummaries) { summary in
+                    ForEach(viewModel.workoutSummaries) { summary in
                         HStack {
                             VStack(alignment: .leading) {
                                 Text(summary.name)
@@ -91,17 +77,4 @@ struct ProgressView: View {
             .background(Color.black.edgesIgnoringSafeArea(.all))
         }
     }
-}
-
-struct DailyCalorie: Identifiable {
-    let id = UUID()
-    let date: Date
-    let calories: Int
-}
-
-struct WorkoutSetSummary: Identifiable {
-    let id = UUID()
-    let name: String
-    let timesCompleted: Int
-    let totalCalories: Int
 }

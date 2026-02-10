@@ -1,13 +1,21 @@
 import SwiftUI
 
 struct WorkoutResultView: View {
-    let totalReps: Int
-    let correctReps: Int
-    let incorrectReps: Int
-    let totalTime: Int
-    let estimatedCalories: Int
+    @StateObject private var viewModel: WorkoutResultViewModel
     
     @Environment(\.presentationMode) var presentationMode
+
+    init(totalReps: Int, correctReps: Int, incorrectReps: Int, totalTime: Int, estimatedCalories: Int) {
+        _viewModel = StateObject(
+            wrappedValue: WorkoutResultViewModel(
+                totalReps: totalReps,
+                correctReps: correctReps,
+                incorrectReps: incorrectReps,
+                totalTime: totalTime,
+                estimatedCalories: estimatedCalories
+            )
+        )
+    }
     
     var body: some View {
         VStack(spacing: 20) {
@@ -16,10 +24,10 @@ struct WorkoutResultView: View {
                 .foregroundColor(.white)
 
             VStack(spacing: 12) {
-                ResultStat(label: "Calories Burned", value: "\(estimatedCalories) kcal")
-                ResultStat(label: "Time Spent", value: "\(totalTime / 60) min \(totalTime % 60) sec")
-                ResultStat(label: "Correct Reps", value: "\(correctReps)")
-                ResultStat(label: "Incorrect Reps", value: "\(incorrectReps)")
+                ResultStat(label: "Calories Burned", value: "\(viewModel.estimatedCalories) kcal")
+                ResultStat(label: "Time Spent", value: viewModel.formattedTime)
+                ResultStat(label: "Correct Reps", value: "\(viewModel.correctReps)")
+                ResultStat(label: "Incorrect Reps", value: "\(viewModel.incorrectReps)")
             }
 
             Spacer()
@@ -37,7 +45,7 @@ struct WorkoutResultView: View {
     }
 }
 
-struct ResultStat: View {
+fileprivate struct ResultStat: View {
     let label: String
     let value: String
     

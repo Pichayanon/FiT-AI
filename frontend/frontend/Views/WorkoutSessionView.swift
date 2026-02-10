@@ -1,0 +1,406 @@
+import SwiftUI
+
+// MARK: - Workout Session (Wall-sit -> show Squat preview 5s -> auto switch to Squat)
+struct WorkoutSessionView: View {
+    let setTitle: String
+
+    @StateObject private var viewModel: WorkoutSessionViewModel
+
+    // ✅ Wall-sit hold timer
+    private let wallSitTick = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+
+    // ✅ Squat idle timer (ยืนเฉยหลัง Stand OK)
+    private let squatIdleTick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+
+    init(setTitle: String) {
+        self.setTitle = setTitle
+        _viewModel = StateObject(wrappedValue: WorkoutSessionViewModel(setTitle: setTitle))
+    }
+
+    var body: some View {
+        ZStack {
+            // ✅ Full-screen camera background
+            CameraPreviewView(session: viewModel.cameraManager.session)
+                .ignoresSafeArea()
+
+            Color.black.opacity(0.06).ignoresSafeArea()
+
+            VStack {
+                TopHUD(
+                    isSessionRunning: viewModel.isSessionRunning,
+                    backendState: viewModel.backendState,
+                    setTitle: viewModel.titleForHUD,
+                    feedback: viewModel.feedback
+                )
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+
+                Spacer()
+
+                bottomPanel
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+            }
+
+            // ✅ Guide overlay (before start)
+            if !viewModel.isSessionRunning {
+                guideCenterOverlay
+                    .transition(.opacity)
+            }
+
+            // ✅ Squat preview overlay (5s)
+            if viewModel.showSquatPreview {
+                squatPreviewOverlay
+                    .transition(.opacity)
+            }
+
+            // ✅ Navigation trigger to Result
+            NavigationLink(
+                destination: WorkoutResultView(
+                    totalReps: viewModel.totalReps,
+                    correctReps: viewModel.correctReps,
+                    incorrectReps: viewModel.incorrectReps,
+                    totalTime: Int(Date().timeIntervalSince(viewModel.startTime)),
+                    estimatedCalories: max(0, viewModel.totalReps) * 4
+                )
+                .navigationBarBackButtonHidden(true),
+                isActive: $viewModel.navigateToResult
+            ) { EmptyView() }
+                .hidden()
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .onAppear {
+            viewModel.onAppear()
+        }
+        .onDisappear {
+            viewModel.onDisappear()
+        }
+        .onChange(of: viewModel.feedback) { _ in
+            viewModel.handleFeedbackChange()
+        }
+        // ✅ นับเวลาเองตอน Hold (แก้ปัญหา backend DEDUP ส่ง result ไม่ถี่)
+        .onReceive(wallSitTick) { _ in
+            viewModel.handleWallSitTick()
+        }
+        .onReceive(squatIdleTick) { _ in
+            viewModel.handleSquatIdleTick()
+        }
+    }
+
+    // MARK: - Center Guide
+    private var guideCenterOverlay: some View {
+        VStack(spacing: 12) {
+            WallSitGuideOverlayCompact()
+
+            Text("Set camera to SIDE VIEW\nPress Start when ready")
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Color.black.opacity(0.45))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .padding(.horizontal, 18)
+    }
+
+    // MARK: - Squat Preview Overlay
+    private var squatPreviewOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.45).ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                SquatGuideOverlayCompact()
+
+                Text("Next: Squat\nStarting in \(viewModel.squatPreviewSeconds)s")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .padding(.horizontal, 18)
+        }
+    }
+
+    // MARK: - Bottom Panel
+    private var bottomPanel: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                statChip(title: "Total", value: viewModel.totalReps, tint: .white)
+                statChip(title: "Correct", value: viewModel.correctReps, tint: .green)
+                statChip(title: "Incorrect", value: viewModel.incorrectReps, tint: .red)
+            }
+
+            progressCard
+
+            if let err = viewModel.cameraManager.lastError {
+                Text("Error: \(err)")
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .padding(.top, 2)
+            }
+
+            if viewModel.showTestVoiceButton {
+                Button("Test Voice") {
+                    viewModel.speech.speak("This is a voice test", language: "en-US", minInterval: 0)
+                }
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity)
+                .background(Color.black.opacity(0.25))
+                .foregroundColor(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+
+            Button {
+                if viewModel.isSessionRunning {
+                    viewModel.finishSession()
+                } else {
+                    viewModel.startSession()
+                }
+            } label: {
+                Text(viewModel.isSessionRunning ? "End Session" : "Start Session")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .foregroundColor(.black)
+                    .background(viewModel.isSessionRunning ? Color.red : Color.green)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+        }
+    }
+
+    private var progressCard: some View {
+        Group {
+            if viewModel.mode == .wallSit {
+                wallSitProgressCard
+            } else {
+                squatProgressCard
+            }
+        }
+    }
+
+    private var wallSitProgressCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(wallSitTitleText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                Spacer()
+
+                if viewModel.wallSitCountingActive {
+                    Text("\(String(format: "%.1f", viewModel.correctSeconds)) / \(String(format: "%.1f", viewModel.targetSeconds)) s")
+                        .font(.caption2.weight(.bold))
+                        .foregroundColor(.white.opacity(0.9))
+                        .monospacedDigit()
+                } else {
+                    Text("\(viewModel.wallSitConsecutiveCorrect) / 3 correct")
+                        .font(.caption2.weight(.bold))
+                        .foregroundColor(.white.opacity(0.9))
+                        .monospacedDigit()
+                }
+            }
+
+            progressBar(viewModel.wallSitProgress01, height: 10)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.24))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var wallSitTitleText: String {
+        if viewModel.passedWallSit { return viewModel.showSquatPreview ? "PASSED ✅ (Next: Squat)" : "PASSED ✅ (Switching…)" }
+        if viewModel.wallSitCountingActive { return "Hold Correct (5s)" }
+        return "Get 3x Correct to start"
+    }
+
+    private var squatProgressCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Squat Goal")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                Spacer()
+                Text("\(viewModel.correctReps) / \(viewModel.squatTargetCorrectReps) correct")
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(.white.opacity(0.9))
+                    .monospacedDigit()
+            }
+
+            progressBar(viewModel.squatProgress01, height: 10)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.24))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func statChip(title: String, value: Int, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption2)
+                .foregroundColor(.white.opacity(0.7))
+            Text("\(value)")
+                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .foregroundColor(tint)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.24))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+}
+
+// MARK: - Top HUD
+private struct TopHUD: View {
+    let isSessionRunning: Bool
+    let backendState: String
+    let setTitle: String
+    let feedback: String
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                pill(text: isSessionRunning ? "Streaming" : "Preview",
+                     dot: isSessionRunning ? .green : .gray)
+                statePill(backendState)
+                Spacer()
+                Text(setTitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white.opacity(0.95))
+                    .lineLimit(1)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.black.opacity(0.30))
+                    .clipShape(Capsule())
+            }
+
+            HStack(spacing: 8) {
+                Text("Live")
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(.white.opacity(0.9))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.black.opacity(0.28))
+                    .clipShape(Capsule())
+
+                Text(feedback)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(Color.black.opacity(0.22))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func pill(text: String, dot: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(dot).frame(width: 8, height: 8)
+            Text(text).font(.caption.weight(.semibold)).foregroundColor(.white)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.black.opacity(0.32))
+        .clipShape(Capsule())
+    }
+
+    private func statePill(_ state: String) -> some View {
+        Text(state.uppercased())
+            .font(.caption2.weight(.bold))
+            .foregroundColor(.white.opacity(0.95))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(Color.black.opacity(0.28))
+            .clipShape(Capsule())
+    }
+}
+
+// MARK: - Guide Overlay Compact (Wall-Sit)
+private struct WallSitGuideOverlayCompact: View {
+    private let frames = ["wall_01", "wall_02", "wall_03"]
+    @State private var idx: Int = 0
+    private let timer = Timer.publish(every: 1.1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(frames[idx])
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: 260, maxHeight: 200)
+                .shadow(radius: 10)
+
+            Text("Stand → Lower → Hold")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.black.opacity(0.45))
+                .clipShape(Capsule())
+        }
+        .onReceive(timer) { _ in
+            withAnimation(.easeInOut(duration: 0.2)) {
+                idx = (idx + 1) % frames.count
+            }
+        }
+    }
+}
+
+// MARK: - Guide Overlay Compact (Squat)
+private struct SquatGuideOverlayCompact: View {
+    private let frames = ["squat_01", "squat_02", "squat_03"] // ✅ ใส่รูปใน Assets
+    @State private var idx: Int = 0
+    private let timer = Timer.publish(every: 1.1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(frames[idx])
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: 260, maxHeight: 200)
+                .shadow(radius: 10)
+
+            Text("Squat • Chest up • Knees out")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.black.opacity(0.45))
+                .clipShape(Capsule())
+        }
+        .onReceive(timer) { _ in
+            withAnimation(.easeInOut(duration: 0.2)) {
+                idx = (idx + 1) % frames.count
+            }
+        }
+    }
+}
+
+// MARK: - Custom Progress Bar
+private func progressBar(_ progress: Double, height: CGFloat = 10) -> some View {
+    GeometryReader { geo in
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: height)
+                .fill(Color.white.opacity(0.25))
+
+            RoundedRectangle(cornerRadius: height)
+                .fill(progress >= 1.0 ? Color.green : Color.white)
+                .frame(width: max(0, geo.size.width * CGFloat(min(progress, 1.0))))
+                .animation(.easeInOut(duration: 0.25), value: progress)
+        }
+    }
+    .frame(height: height)
+}

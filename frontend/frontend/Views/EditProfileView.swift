@@ -1,10 +1,7 @@
 import SwiftUI
 
 struct EditProfileView: View {
-    @State private var name: String = "Pichayanon"
-    @State private var age: String = "21"
-    @State private var weight: String = "70"
-    @State private var height: String = "175"
+    @StateObject private var viewModel = EditProfileViewModel()
     
     var body: some View {
         VStack(spacing: 20) {
@@ -15,16 +12,16 @@ struct EditProfileView: View {
                 .padding(.top, 40)
             
             Group {
-                ProfileTextField(title: "Name", text: $name)
-                ProfileTextField(title: "Age", text: $age)
-                ProfileTextField(title: "Weight (kg)", text: $weight)
-                ProfileTextField(title: "Height (cm)", text: $height)
+                ProfileTextField(title: "Name", text: $viewModel.name)
+                ProfileTextField(title: "Age", text: $viewModel.age)
+                ProfileTextField(title: "Weight (kg)", text: $viewModel.weight)
+                ProfileTextField(title: "Height (cm)", text: $viewModel.height)
             }
             
             Spacer()
             
             Button(action: {
-                print("Saved: \(name), \(age), \(weight), \(height)")
+                viewModel.save()
             }) {
                 Text("Save")
                     .frame(maxWidth: .infinity)
@@ -42,7 +39,7 @@ struct EditProfileView: View {
     }
 }
 
-struct ProfileTextField: View {
+fileprivate struct ProfileTextField: View {
     let title: String
     @Binding var text: String
     
