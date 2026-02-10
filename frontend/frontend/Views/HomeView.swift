@@ -1,7 +1,12 @@
 import SwiftUI
 
 struct HomeView: View {
+    @ObservedObject var authService: AuthService
     @StateObject private var viewModel = HomeViewModel()
+
+    private var displayName: String {
+        authService.displayName ?? viewModel.userName
+    }
 
     var body: some View {
         NavigationView {
@@ -9,7 +14,7 @@ struct HomeView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     HStack {
                         VStack(alignment: .leading) {
-                            Text("Hi, \(viewModel.userName)")
+                            Text("Hi, \(displayName)")
                                 .font(.title)
                                 .fontWeight(.bold)
                                 .foregroundColor(Color(.white))
@@ -19,7 +24,7 @@ struct HomeView: View {
                                 .foregroundColor(.gray)
                         }
                         Spacer()
-                        NavigationLink(destination: EditProfileView()) {
+                        NavigationLink(destination: EditProfileView(authService: authService)) {
                             Image(systemName: "person.circle.fill")
                                 .font(.largeTitle)
                                 .foregroundColor(.white)
@@ -112,5 +117,5 @@ fileprivate struct WorkoutSetCard: View {
 
 
 #Preview {
-    HomeView()
+    HomeView(authService: AuthService())
 }
