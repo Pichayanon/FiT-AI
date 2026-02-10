@@ -3,7 +3,7 @@ wall_sit_streaming_oop.py (NO OVERLAY / NO RECORDING) - OOP VERSION
 
 Streaming (WebSocket) + SIDE-VIEW gate (one side only)
 + PRINT logs + Status to iOS
-+ DEDUP RULE: Send {"type":"result"} ONLY when prediction label changes
++ (Optional) DEDUP RULE: Send {"type":"result"} ONLY when prediction label changes
 
 PHASE (status.state) to iOS:
   - NO_POSE
@@ -21,7 +21,7 @@ WS protocol (from iOS):
 
 Server -> iOS:
   - {"type":"status","state":"NO_POSE|HAVE_POSE|BUFFERING|INFERENCING", ...}
-  - {"type":"result","prediction":"...", "confidence":..., ...}   (ONLY when changed)
+  - {"type":"result","prediction":"...", "confidence":..., ...}
   - {"type":"info","message":"..."}  (optional)
 """
 
@@ -84,6 +84,14 @@ PHASE_HAVE_POSE = "HAVE_POSE"
 PHASE_BUFFERING = "BUFFERING"
 PHASE_INFERENCING = "INFERENCING"
 
+# NO_POSE watchdog seconds
+NO_POSE_ADJUST_SECONDS = 5.0
+
+# DARK watchdog (check before NO_POSE message)
+DARK_ADJUST_SECONDS = 5.0
+# Mean grayscale brightness threshold (0..255). Lower = darker.
+DARK_BRIGHTNESS_TH = 55.0
+
 
 # -----------------------------
 # App
@@ -123,12 +131,20 @@ class StreamState:
     last_pred_label: str = ""
     last_pred_conf: Optional[float] = None
 
-    # de-dup send (ONLY send result when changed)
+    # last sent (for optional dedup)
     last_sent_label: str = ""
     last_sent_conf: Optional[float] = None
 
     # frame count (misc)
     frame_count: int = 0
+
+    # NO_POSE watchdog
+    no_pose_since: Optional[float] = None
+    no_pose_alerted: bool = False
+
+    # DARK watchdog (only meaningful when NO_POSE)
+    dark_since: Optional[float] = None
+    dark_alerted: bool = False
 
 
 # -----------------------------
@@ -178,6 +194,23 @@ class FrameDecoder:
             return img
         except Exception:
             return None
+
+
+class FrameQuality:
+    """Cheap frame quality checks (brightness)."""
+
+    @staticmethod
+    def compute_brightness_mean_bgr(frame_bgr: np.ndarray) -> float:
+        """
+        Return mean grayscale brightness in range 0..255.
+        """
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        return float(np.mean(gray))
+
+    @staticmethod
+    def is_too_dark(frame_bgr: np.ndarray, th: float) -> Tuple[bool, float]:
+        mean_v = FrameQuality.compute_brightness_mean_bgr(frame_bgr)
+        return (mean_v < float(th)), mean_v
 
 
 class LabelMapper:
@@ -310,37 +343,6 @@ class FeatureExtractor:
         return np.array([np.mean(vals), np.std(vals), np.min(vals)], dtype=np.float32)
 
 
-class DedupSender:
-    """Send result EVERY inference (no dedup)."""
-
-    def __init__(self, debug: bool) -> None:
-        self.debug = debug
-
-    async def maybe_send_result(
-        self,
-        websocket: WebSocket,
-        st: StreamState,
-        pred_label: str,
-        conf: Optional[float],
-        window: int,
-    ) -> None:
-        payload: Dict[str, Any] = {
-            "type": "result",
-            "prediction": pred_label,
-            "confidence": round(conf, 3) if conf is not None else None,
-            "window": window,
-            "session_id": st.session_id,
-            "side": st.chosen_side,
-        }
-        if self.debug:
-            print(f"[PRED] {payload}")
-        await websocket.send_text(json.dumps(payload))
-
-        # (optional) เก็บไว้เฉยๆ
-        st.last_sent_label = pred_label
-        st.last_sent_conf = conf
-
-
 class StatusSender:
     """Send throttled status PHASE to iOS."""
 
@@ -387,7 +389,6 @@ class WallSitWebSocketSession:
         feat: FeatureExtractor,
         labels: LabelMapper,
         status: StatusSender,
-        dedup: DedupSender,
         window_frames: int,
         ready_streak_n: int,
         debug: bool,
@@ -398,7 +399,6 @@ class WallSitWebSocketSession:
         self.feat = feat
         self.labels = labels
         self.status = status
-        self.dedup = dedup
         self.window_frames = int(window_frames)
         self.ready_streak_n = int(ready_streak_n)
         self.debug = debug
@@ -439,7 +439,6 @@ class WallSitWebSocketSession:
                 elif mtype == "frame":
                     await self._handle_frame(data)
                 else:
-                    # ignore
                     continue
 
         except WebSocketDisconnect:
@@ -465,6 +464,12 @@ class WallSitWebSocketSession:
     async def _handle_start(self) -> None:
         self.st = StreamState(started=True)
         self.st.session_id = str(int(time.time() * 1000))
+
+        self.st.no_pose_since = None
+        self.st.no_pose_alerted = False
+        self.st.dark_since = None
+        self.st.dark_alerted = False
+
         print(f"[SESSION] START session_id={self.st.session_id}")
 
         await self.status.send_info(self.ws, "Start streaming", {"session_id": self.st.session_id})
@@ -477,20 +482,26 @@ class WallSitWebSocketSession:
         await self.status.send_info(self.ws, "Stop streaming", {"session_id": self.st.session_id})
         await self.status.send_status(self.ws, self.st, PHASE_NO_POSE, {"reason": "session_stopped"}, force=True)
 
-        self._reset_gate_and_buffers()
+        self._reset_gate_and_buffers(reset_watchdog=True)
 
-    def _reset_gate_and_buffers(self) -> None:
+    def _reset_gate_and_buffers(self, reset_watchdog: bool) -> None:
         self.st.foot_wall_vals.clear()
         self.st.ready = False
         self.st.ready_streak = 0
         self.st.chosen_side = None
 
-        # IMPORTANT: reset dedup memory so next label can send again after reacquire
+        # reset last sent/pred memories
         self.st.last_sent_label = ""
         self.st.last_sent_conf = None
         self.st.last_pred_label = ""
         self.st.last_pred_conf = None
         self.st.frame_count = 0
+
+        if reset_watchdog:
+            self.st.no_pose_since = None
+            self.st.no_pose_alerted = False
+            self.st.dark_since = None
+            self.st.dark_alerted = False
 
     async def _handle_frame(self, data: Dict[str, Any]) -> None:
         if not self.st.started:
@@ -502,6 +513,9 @@ class WallSitWebSocketSession:
         if frame is None:
             await self.status.send_info(self.ws, "Decode failed")
             return
+
+        # brightness check (used when NO_POSE)
+        too_dark, brightness_mean = FrameQuality.is_too_dark(frame, DARK_BRIGHTNESS_TH)
 
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         res = self.pose.process(img_rgb)
@@ -517,9 +531,54 @@ class WallSitWebSocketSession:
             else:
                 chosen_side, side_debug = self.gate.choose_best_side(lm)
 
-        # Gate fail -> reset => NO_POSE
+        # Gate fail -> NO_POSE watchdog + DARK watchdog (dark first)
         if (not res.pose_landmarks) or (chosen_side is None):
-            self._reset_gate_and_buffers()
+            now = time.time()
+
+            # start counting NO_POSE duration
+            if self.st.no_pose_since is None:
+                self.st.no_pose_since = now
+                self.st.no_pose_alerted = False
+
+            # start/stop counting DARK duration
+            if too_dark:
+                if self.st.dark_since is None:
+                    self.st.dark_since = now
+                    self.st.dark_alerted = False
+            else:
+                self.st.dark_since = None
+                self.st.dark_alerted = False
+
+            # 1) DARK message first (one-time)
+            if (
+                too_dark
+                and (self.st.dark_since is not None)
+                and (not self.st.dark_alerted)
+                and (now - self.st.dark_since >= DARK_ADJUST_SECONDS)
+            ):
+                await self.status.send_info(
+                    self.ws,
+                    "Please adjust your lights.",
+                    {"brightness_mean": round(brightness_mean, 1), "brightness_th": DARK_BRIGHTNESS_TH},
+                )
+                self.st.dark_alerted = True
+
+            # 2) NO_POSE message (only if not already explained by dark)
+            if (
+                (not self.st.no_pose_alerted)
+                and (now - self.st.no_pose_since >= NO_POSE_ADJUST_SECONDS)
+                and (not too_dark)  # if dark, we prefer dark message
+            ):
+                await self.status.send_info(
+                    self.ws,
+                    "Please Adjust Your Pose",
+                    {"brightness_mean": round(brightness_mean, 1), "brightness_th": DARK_BRIGHTNESS_TH},
+                )
+                self.st.no_pose_alerted = True
+
+            # reset gate/buffer, but keep watchdog running (reset_watchdog=False)
+            self._reset_gate_and_buffers(reset_watchdog=False)
+
             await self.status.send_status(
                 self.ws,
                 self.st,
@@ -530,10 +589,19 @@ class WallSitWebSocketSession:
                     "needed_streak": self.ready_streak_n,
                     "window_fill": 0,
                     "window_size": self.window_frames,
+                    "too_dark": too_dark,
+                    "brightness_mean": round(brightness_mean, 1),
+                    "brightness_th": DARK_BRIGHTNESS_TH,
                     "debug": side_debug if self.debug else None,
                 },
             )
             return
+
+        # regained pose -> reset watchdogs
+        self.st.no_pose_since = None
+        self.st.no_pose_alerted = False
+        self.st.dark_since = None
+        self.st.dark_alerted = False
 
         # Side OK this frame
         self.st.ready_streak += 1
@@ -560,7 +628,7 @@ class WallSitWebSocketSession:
             self.st.ready = True
             self.st.foot_wall_vals.clear()
 
-            # reset dedup when first becomes READY
+            # reset last sent (if you previously used dedup)
             self.st.last_sent_label = ""
             self.st.last_sent_conf = None
 
@@ -577,7 +645,6 @@ class WallSitWebSocketSession:
                 {"chosen_side": chosen_side, "window_fill": 0, "window_size": self.window_frames},
                 force=True,
             )
-            # continue to buffering/inferencing in same frame
 
         # If model missing, still report phase but skip inference
         if (not self.model_svc.loaded) or (not self.st.ready) or (self.st.chosen_side is None):
@@ -632,7 +699,7 @@ class WallSitWebSocketSession:
             },
         )
 
-        vals = self.st.foot_wall_vals[-self.window_frames :]
+        vals = self.st.foot_wall_vals[-self.window_frames:]
         agg_feat = self.feat.aggregate_window(vals)
 
         pred_id, conf = self.model_svc.predict(agg_feat)
@@ -641,13 +708,18 @@ class WallSitWebSocketSession:
         self.st.last_pred_label = pred_label
         self.st.last_pred_conf = conf
 
-        await self.dedup.maybe_send_result(
-            websocket=self.ws,
-            st=self.st,
-            pred_label=pred_label,
-            conf=conf,
-            window=self.window_frames,
-        )
+        # send result every inference (dedup removed)
+        payload: Dict[str, Any] = {
+            "type": "result",
+            "prediction": pred_label,
+            "confidence": round(conf, 3) if conf is not None else None,
+            "window": self.window_frames,
+            "session_id": self.st.session_id,
+            "side": self.st.chosen_side,
+        }
+        if self.debug:
+            print(f"[PRED] {payload}")
+        await self.ws.send_text(json.dumps(payload))
 
         # keep list bounded (avoid growing forever)
         if len(self.st.foot_wall_vals) > (self.window_frames + 60):
@@ -665,7 +737,6 @@ side_gate = SideGate(mp_pose=mp_pose, side_mode=SIDE_MODE, vis_th=VIS_TH)
 feature_extractor = FeatureExtractor(mp_pose=mp_pose)
 
 status_sender = StatusSender(every_n_frames=STATUS_SEND_EVERY_N_FRAMES)
-dedup_sender = DedupSender(debug=DEBUG)
 
 
 @app.get("/health")
@@ -681,6 +752,9 @@ def health() -> Dict[str, Any]:
         "mp_det_conf": MP_MIN_DET_CONF,
         "mp_track_conf": MP_MIN_TRACK_CONF,
         "cwd": os.path.abspath("."),
+        "no_pose_adjust_seconds": NO_POSE_ADJUST_SECONDS,
+        "dark_adjust_seconds": DARK_ADJUST_SECONDS,
+        "dark_brightness_th": DARK_BRIGHTNESS_TH,
     }
 
 
@@ -693,7 +767,6 @@ async def ws_video(websocket: WebSocket) -> None:
         feat=feature_extractor,
         labels=label_mapper,
         status=status_sender,
-        dedup=dedup_sender,
         window_frames=WINDOW_FRAMES,
         ready_streak_n=READY_STREAK_N,
         debug=DEBUG,
