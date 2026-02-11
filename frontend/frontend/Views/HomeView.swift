@@ -2,10 +2,13 @@ import SwiftUI
 
 struct HomeView: View {
     @ObservedObject var authService: AuthService
+    @ObservedObject var profileService: ProfileService
     @StateObject private var viewModel = HomeViewModel()
 
     private var displayName: String {
-        authService.displayName ?? viewModel.userName
+        let fromProfile = profileService.currentProfile?.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let name = fromProfile, !name.isEmpty { return name }
+        return authService.displayName ?? viewModel.userName
     }
 
     var body: some View {
@@ -24,7 +27,7 @@ struct HomeView: View {
                                 .foregroundColor(.gray)
                         }
                         Spacer()
-                        NavigationLink(destination: EditProfileView(authService: authService)) {
+                        NavigationLink(destination: EditProfileView(authService: authService, profileService: profileService)) {
                             Image(systemName: "person.circle.fill")
                                 .font(.largeTitle)
                                 .foregroundColor(.white)
@@ -117,5 +120,5 @@ fileprivate struct WorkoutSetCard: View {
 
 
 #Preview {
-    HomeView(authService: AuthService())
+    HomeView(authService: AuthService(), profileService: ProfileService())
 }

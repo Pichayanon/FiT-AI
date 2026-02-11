@@ -4,6 +4,7 @@ import FirebaseCore
 @main
 struct frontendApp: App {
     @StateObject private var authService = AuthService()
+    @StateObject private var profileService = ProfileService()
 
     init() {
         FirebaseApp.configure()
@@ -15,7 +16,7 @@ struct frontendApp: App {
                 if authService.currentUser == nil {
                     LoginView(authService: authService)
                 } else {
-                    HomeView(authService: authService)
+                    HomeView(authService: authService, profileService: profileService)
                 }
             }
         }
