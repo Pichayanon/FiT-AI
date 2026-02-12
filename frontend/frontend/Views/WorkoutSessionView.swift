@@ -18,49 +18,45 @@ struct WorkoutSessionView: View {
     }
 
     var body: some View {
-        ZStack {
-            // ✅ Full-screen camera background
-            CameraPreviewView(session: viewModel.cameraManager.session)
-                .ignoresSafeArea()
+        NavigationStack {
+            ZStack {
+                CameraPreviewView(session: viewModel.cameraManager.session)
+                    .ignoresSafeArea()
 
-            Color.black.opacity(0.06).ignoresSafeArea()
+                Color.black.opacity(0.06).ignoresSafeArea()
 
-            VStack {
-                TopHUD(
-                    isSessionRunning: viewModel.isSessionRunning,
-                    backendState: viewModel.backendState,
-                    setTitle: viewModel.titleForHUD,
-                    feedback: viewModel.feedback
-                )
-                .padding(.horizontal, 14)
-                .padding(.top, 8)
-
-                Spacer()
-
-                bottomPanel
+                VStack {
+                    TopHUD(
+                        isSessionRunning: viewModel.isSessionRunning,
+                        backendState: viewModel.backendState,
+                        setTitle: viewModel.titleForHUD,
+                        feedback: viewModel.feedback
+                    )
                     .padding(.horizontal, 14)
-                    .padding(.bottom, 10)
-            }
+                    .padding(.top, 8)
 
-            // ✅ Guide overlay (before start)
-            if !viewModel.isSessionRunning {
-                guideCenterOverlay
-                    .transition(.opacity)
-            }
+                    Spacer()
 
-            // ✅ Squat preview overlay (5s)
-            if viewModel.showSquatPreview {
-                squatPreviewOverlay
-                    .transition(.opacity)
-            }
+                    bottomPanel
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 10)
+                }
 
-            // ✅ Navigation trigger to Result (สรุปเป็น List ตามท่า: wall-sit + squat)
-            NavigationLink(
-                destination: WorkoutResultView(summary: viewModel.sessionSummary)
-                    .navigationBarBackButtonHidden(true),
-                isActive: $viewModel.navigateToResult
-            ) { EmptyView() }
-                .hidden()
+                if !viewModel.isSessionRunning {
+                    guideCenterOverlay
+                        .transition(.opacity)
+                }
+
+                if viewModel.showSquatPreview {
+                    squatPreviewOverlay
+                        .transition(.opacity)
+                }
+            }
+            .navigationBarBackButtonHidden(true)
+            .navigationDestination(isPresented: $viewModel.navigateToResult) {
+                WorkoutResultView(summary: viewModel.sessionSummary)
+                    .navigationBarBackButtonHidden(true)
+            }
         }
         .toolbar(.hidden, for: .navigationBar)
         .onAppear {
@@ -69,7 +65,7 @@ struct WorkoutSessionView: View {
         .onDisappear {
             viewModel.onDisappear()
         }
-        .onChange(of: viewModel.feedback) { _ in
+        .onChange(of: viewModel.feedback) { oldValue, newValue in
             viewModel.handleFeedbackChange()
         }
         // ✅ นับเวลาเองตอน Hold (แก้ปัญหา backend DEDUP ส่ง result ไม่ถี่)

@@ -20,7 +20,7 @@ struct EditProfileView: View {
                     .scaledToFit()
                     .frame(width: 100, height: 100)
                     .foregroundColor(.yellow)
-                    .padding(.top, 24)
+                    .padding(.top, 8)
 
                 if let message = profileService.errorMessage {
                     Text(message)
@@ -77,6 +77,7 @@ struct EditProfileView: View {
         .scrollDismissesKeyboard(.interactively)
         .background(Color.black.ignoresSafeArea())
         .navigationTitle("Edit Profile")
+        .navigationBarTitleDisplayMode(.inline)
         .foregroundColor(.white)
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {

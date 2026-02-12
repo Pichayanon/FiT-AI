@@ -54,11 +54,17 @@ final class CameraManager: NSObject, ObservableObject {
         if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
 
         if let conn = videoOutput.connection(with: .video) {
-            if conn.isVideoOrientationSupported {
-                conn.videoOrientation = .portrait
+            if #available(iOS 17.0, *) {
+                if conn.isVideoRotationAngleSupported(90) {
+                    conn.videoRotationAngle = 90
+                }
+            } else {
+                if conn.isVideoOrientationSupported {
+                    conn.videoOrientation = .portrait
+                }
             }
             if conn.isVideoMirroringSupported {
-                conn.isVideoMirrored = true // front camera mirror 느낌
+                conn.isVideoMirrored = true
             }
         }
 

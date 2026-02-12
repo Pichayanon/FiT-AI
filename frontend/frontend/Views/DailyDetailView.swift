@@ -41,5 +41,6 @@ struct DailyDetailView: View {
         .padding()
         .background(Color.black.edgesIgnoringSafeArea(.all))
         .navigationTitle("Daily Summary")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

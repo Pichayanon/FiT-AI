@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 
 /// ViewModel สำหรับจัดการ state + business logic ของ `WorkoutSessionView`
+@MainActor
 final class WorkoutSessionViewModel: ObservableObject {
     enum Mode { case wallSit, squat }
 
@@ -13,6 +14,7 @@ final class WorkoutSessionViewModel: ObservableObject {
     // MARK: - Dependencies
     @Published var cameraManager = CameraManager()
     let speech = SpeechManager()
+    private let workoutHistory = WorkoutHistoryService()
 
     // MARK: - Inputs
     let setTitle: String
@@ -172,6 +174,7 @@ final class WorkoutSessionViewModel: ObservableObject {
     func finishSession() {
         stopSession()
         sessionSummary = buildSessionSummary()
+        Task { await workoutHistory.saveSession(summary: sessionSummary, setTitle: setTitle) }
         navigateToResult = true
     }
 

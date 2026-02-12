@@ -29,7 +29,7 @@ struct WorkoutResultView: View {
                         }
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.top, 28)
+                    .padding(.top, 12)
                     .padding(.bottom, 8)
 
                     Text("Summary")
@@ -118,9 +118,11 @@ fileprivate struct SummaryExerciseCard: View {
                         .font(.subheadline)
                         .fontWeight(.medium)
                         .foregroundColor(.white)
-                    Text("Total \(totalReps) reps · \(incorrectReps) incorrect")
-                        .font(.caption)
-                        .foregroundColor(.gray)
+                    if totalReps > 0 {
+                        Text("Total \(totalReps) reps · \(incorrectReps) incorrect")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
                     errorsBlock(errors)
                 }
 
@@ -179,7 +181,7 @@ fileprivate struct SummaryExerciseCard: View {
     private var iconName: String {
         switch item.displayName.lowercased() {
         case "wall-sit": return "figure.stand"
-        case "squat": return "figure.squat"
+        case "squat": return "figure.strengthtraining.traditional"
         default: return "figure.strengthtraining.traditional"
         }
     }
