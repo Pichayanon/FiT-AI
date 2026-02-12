@@ -59,6 +59,12 @@ final class WorkoutSessionViewModel: ObservableObject {
     // Current mode (เริ่มจาก wall-sit)
     @Published var mode: Mode = .wallSit
 
+    /// สรุป session สำหรับส่งไปหน้า result (เซ็ตตอน finishSession)
+    @Published var sessionSummary: SessionSummary = SessionSummary(items: [], totalTimeSeconds: 0, estimatedCalories: 0)
+
+    /// นับจำนวนครั้งที่ผิดแต่ละประเภทใน wall-sit (label จาก backend → count)
+    private var wallSitErrorCounts: [String: Int] = [:]
+
     // MARK: - Constants
     private let speechLang = "en-US"
 
@@ -150,6 +156,8 @@ final class WorkoutSessionViewModel: ObservableObject {
         lastStandOKAt = nil
         lastPleaseStartAt = .distantPast
 
+        wallSitErrorCounts = [:]
+
         cameraManager.startStreaming(to: activeWSURL)
         speech.speak("Session started", language: speechLang, minInterval: 0)
     }
@@ -163,7 +171,50 @@ final class WorkoutSessionViewModel: ObservableObject {
 
     func finishSession() {
         stopSession()
+        sessionSummary = buildSessionSummary()
         navigateToResult = true
+    }
+
+    /// Map backend label to display text (English)
+    private static func displayLabel(for backendLabel: String) -> String {
+        let p = backendLabel.lowercased()
+        if p.contains("feet_too_close") || p.contains("feet too close") { return "Feet too close" }
+        if p.contains("knees_in") || p.contains("knees in") { return "Knees in" }
+        return backendLabel
+    }
+
+    private func buildSessionSummary() -> SessionSummary {
+        let totalTime = Int(Date().timeIntervalSince(startTime))
+        let calories = max(0, correctReps) * 4
+
+        var items: [ExerciseSummaryItem] = []
+
+        // Wall-sit (isometric): ทำไปกี่วิ + ผิดอะไรบ้าง
+        let wallSitErrors: [ErrorCount] = wallSitErrorCounts
+            .filter { $0.value > 0 }
+            .map { ErrorCount(reason: Self.displayLabel(for: $0.key), count: $0.value) }
+            .sorted { $0.count > $1.count }
+        items.append(.isometric(
+            name: "Wall-Sit",
+            durationSeconds: correctSeconds,
+            targetSeconds: targetSeconds,
+            errors: wallSitErrors
+        ))
+
+        // Squat (movement): ทำทั้งหมดกี่ครั้ง · เป้าหมาย + ผิดอะไรบ้าง
+        let squatErrors: [ErrorCount] = incorrectReps > 0
+            ? [ErrorCount(reason: "Knees in", count: incorrectReps)]
+            : []
+        items.append(.movement(
+            name: "Squat",
+            totalReps: totalReps,
+            correctReps: correctReps,
+            incorrectReps: incorrectReps,
+            targetCorrectReps: squatTargetCorrectReps,
+            errors: squatErrors
+        ))
+
+        return SessionSummary(items: items, totalTimeSeconds: totalTime, estimatedCalories: calories)
     }
 
     // MARK: - Timers
@@ -384,6 +435,11 @@ final class WorkoutSessionViewModel: ObservableObject {
 
         // ให้ timer รู้ว่าตอนนี้ correct อยู่ไหม (แม้ backend dedup)
         wallSitIsCorrectHold = isCorrectNow
+
+        // นับข้อผิดพลาดแต่ละประเภท (สำหรับ summary)
+        if !isCorrectNow {
+            wallSitErrorCounts[pred] = (wallSitErrorCounts[pred] ?? 0) + 1
+        }
 
         if passedWallSit { return }
 

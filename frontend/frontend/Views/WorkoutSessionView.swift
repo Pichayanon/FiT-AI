@@ -54,16 +54,10 @@ struct WorkoutSessionView: View {
                     .transition(.opacity)
             }
 
-            // ✅ Navigation trigger to Result
+            // ✅ Navigation trigger to Result (สรุปเป็น List ตามท่า: wall-sit + squat)
             NavigationLink(
-                destination: WorkoutResultView(
-                    totalReps: viewModel.totalReps,
-                    correctReps: viewModel.correctReps,
-                    incorrectReps: viewModel.incorrectReps,
-                    totalTime: Int(Date().timeIntervalSince(viewModel.startTime)),
-                    estimatedCalories: max(0, viewModel.totalReps) * 4
-                )
-                .navigationBarBackButtonHidden(true),
+                destination: WorkoutResultView(summary: viewModel.sessionSummary)
+                    .navigationBarBackButtonHidden(true),
                 isActive: $viewModel.navigateToResult
             ) { EmptyView() }
                 .hidden()

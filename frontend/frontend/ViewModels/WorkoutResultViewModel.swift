@@ -3,22 +3,14 @@ import SwiftUI
 
 @MainActor
 final class WorkoutResultViewModel: ObservableObject {
-    let totalReps: Int
-    let correctReps: Int
-    let incorrectReps: Int
-    let totalTime: Int
-    let estimatedCalories: Int
+    let summary: SessionSummary
 
-    init(totalReps: Int, correctReps: Int, incorrectReps: Int, totalTime: Int, estimatedCalories: Int) {
-        self.totalReps = totalReps
-        self.correctReps = correctReps
-        self.incorrectReps = incorrectReps
-        self.totalTime = totalTime
-        self.estimatedCalories = estimatedCalories
+    init(summary: SessionSummary) {
+        self.summary = summary
     }
 
-    var formattedTime: String {
-        "\(totalTime / 60) min \(totalTime % 60) sec"
+    var formattedTotalTime: String {
+        let t = summary.totalTimeSeconds
+        return "\(t / 60) min \(t % 60) sec"
     }
 }
-
