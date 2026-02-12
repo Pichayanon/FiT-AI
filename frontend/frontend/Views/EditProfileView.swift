@@ -38,17 +38,17 @@ struct EditProfileView: View {
                 }
                 .padding(.horizontal, 4)
 
-                // ปุ่ม Save ความสูงคงที่ ไม่กระตุก
                 Button(action: {
                     Task { await viewModel.save() }
                 }) {
-                    HStack(spacing: 8) {
+                    Group {
                         if profileService.isSaving {
-                            ProgressView()
+                            SwiftUI.ProgressView()
                                 .progressViewStyle(CircularProgressViewStyle(tint: .black))
+                        } else {
+                            Text("Save")
+                                .fontWeight(.semibold)
                         }
-                        Text(profileService.isSaving ? "Saving..." : "Save")
-                            .fontWeight(.semibold)
                     }
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)

@@ -398,13 +398,16 @@ final class WorkoutSessionViewModel: ObservableObject {
                         self.squatStarted = true
                     }
 
-                    // 3️⃣ REP UPDATE
+                    // 3️⃣ REP UPDATE (backend ส่ง total, dataset_correct/good, incorrect)
                     if let reps = obj["reps"] as? [String: Any] {
                         if let total = reps["total"] as? Int {
                             self.totalReps = total
                         }
 
-                        if let correct = reps["correct"] as? Int {
+                        let correct: Int? = (reps["correct"] as? Int)
+                            ?? (reps["dataset_correct"] as? Int)
+                            ?? (reps["good"] as? Int)
+                        if let correct = correct {
                             if correct > self.correctReps {
                                 self.speech.speak("Good", language: self.speechLang, minInterval: 0.5, allowRepeat: true)
                                 self.lastSpokenCorrectReps = correct
@@ -412,7 +415,8 @@ final class WorkoutSessionViewModel: ObservableObject {
                             self.correctReps = correct
                         }
 
-                        if let incorrect = reps["incorrect"] as? Int {
+                        let incorrect: Int? = (reps["incorrect"] as? Int) ?? (reps["bad"] as? Int)
+                        if let incorrect = incorrect {
                             self.incorrectReps = incorrect
                         }
 

@@ -51,6 +51,11 @@ struct WorkoutSessionView: View {
                     squatPreviewOverlay
                         .transition(.opacity)
                 }
+
+                if showLightAdjustOverlay {
+                    lightAdjustOverlay
+                        .transition(.opacity)
+                }
             }
             .navigationBarBackButtonHidden(true)
             .navigationDestination(isPresented: $viewModel.navigateToResult) {
@@ -92,6 +97,7 @@ struct WorkoutSessionView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .padding(.horizontal, 18)
+        .offset(y: -40)
     }
 
     // MARK: - Squat Preview Overlay
@@ -112,6 +118,39 @@ struct WorkoutSessionView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .padding(.horizontal, 18)
+            .offset(y: -40)
+        }
+    }
+
+    // MARK: - Light adjust overlay (เมื่อ backend เตือนว่าแสงน้อย)
+    private var showLightAdjustOverlay: Bool {
+        let f = viewModel.feedback.lowercased()
+        return viewModel.isSessionRunning
+            && (f.contains("adjust") && (f.contains("light") || f.contains("lights")) || f.contains("too dark") || f.contains("dark"))
+    }
+
+    private var lightAdjustOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.45).ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                Image("light")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 280, maxHeight: 220)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                Text("Adjust your light")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .padding(.horizontal, 24)
+            .offset(y: -40)
         }
     }
 
@@ -349,31 +388,28 @@ private struct WallSitGuideOverlayCompact: View {
     }
 }
 
-// MARK: - Guide Overlay Compact (Squat)
+// MARK: - Guide Overlay Compact (Squat) — ย่อ → หยุด → ขึ้น
 private struct SquatGuideOverlayCompact: View {
-    private let frames = ["squat_01", "squat_02", "squat_03"] // ✅ ใส่รูปใน Assets
-    @State private var idx: Int = 0
-    private let timer = Timer.publish(every: 1.1, on: .main, in: .common).autoconnect()
+    private let frames = ["squat_01", "squat_02", "squat_03"]
 
     var body: some View {
-        VStack(spacing: 10) {
-            Image(frames[idx])
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: 260, maxHeight: 200)
-                .shadow(radius: 10)
+        TimelineView(.periodic(from: Date(), by: 1.1)) { context in
+            let idx = Int(context.date.timeIntervalSince1970 / 1.1) % frames.count
+            VStack(spacing: 10) {
+                Image(frames[idx])
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 260, maxHeight: 200)
+                    .shadow(radius: 10)
+                    .animation(.easeInOut(duration: 0.2), value: idx)
 
-            Text("Squat • Chest up • Knees out")
-                .font(.caption.weight(.semibold))
-                .foregroundColor(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color.black.opacity(0.45))
-                .clipShape(Capsule())
-        }
-        .onReceive(timer) { _ in
-            withAnimation(.easeInOut(duration: 0.2)) {
-                idx = (idx + 1) % frames.count
+                Text("Lower → Hold → Stand up")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(Capsule())
             }
         }
     }
