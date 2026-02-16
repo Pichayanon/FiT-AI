@@ -48,6 +48,7 @@ import cv2
 import joblib
 import mediapipe as mp
 import numpy as np
+from typing import List, Tuple
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -55,12 +56,16 @@ from fastapi.middleware.cors import CORSMiddleware
 # -----------------------------
 # Config
 # -----------------------------
-MODEL_PATH = "wall_sit/models/wall_sit_side_model.pkl"
+MODEL_PATH = "wall_sit/models/wall_sit_model.pkl"
 
 LABELS: Dict[int, str] = {
-    0: "dataset_correct",
-    1: "dataset_feet_too_close",
+    0: "correct",
+    1: "feet_too_close",
+    2: "feet_too_far",
+    3: "back_of_wall",
+    4: "not_deep_enough",
 }
+
 
 WINDOW_FRAMES = 15          # frames per window
 READY_STREAK_N = 3          # require side landmarks N consecutive frames
@@ -113,7 +118,7 @@ app.add_middleware(
 @dataclass
 class StreamState:
     started: bool = False
-    foot_wall_vals: List[float] = field(default_factory=list)
+    foot_wall_vals: List[Tuple[float, float, float]] = field(default_factory=list)
 
     # gate
     ready: bool = False
@@ -309,14 +314,22 @@ class SideGate:
 
 
 class FeatureExtractor:
-    """Extract per-frame features used by the model."""
+    """Extract per-frame features used by the 5-class model."""
 
     def __init__(self, mp_pose: Any) -> None:
         self.mp_pose = mp_pose
 
-    def extract_foot_wall(self, res: Any, side: str) -> Optional[float]:
+    @staticmethod
+    def angle(a, b, c):
+        a, b, c = np.array(a), np.array(b), np.array(c)
+        ba, bc = a - b, c - b
+        cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
+        return np.degrees(np.arccos(np.clip(cos, -1, 1)))
+
+    def extract_features(self, res: Any, side: str) -> Optional[Tuple[float, float, float]]:
         """
-        foot_wall = |ankle.x - hip.x| / shoulder_width
+        Returns:
+        (foot_wall_norm, knee_angle, torso_alignment)
         """
         if not res.pose_landmarks:
             return None
@@ -325,22 +338,59 @@ class FeatureExtractor:
 
         if side == "right":
             hip = self.mp_pose.PoseLandmark.RIGHT_HIP
-            ank = self.mp_pose.PoseLandmark.RIGHT_ANKLE
+            knee = self.mp_pose.PoseLandmark.RIGHT_KNEE
+            ankle = self.mp_pose.PoseLandmark.RIGHT_ANKLE
+            shoulder = self.mp_pose.PoseLandmark.RIGHT_SHOULDER
         else:
             hip = self.mp_pose.PoseLandmark.LEFT_HIP
-            ank = self.mp_pose.PoseLandmark.LEFT_ANKLE
+            knee = self.mp_pose.PoseLandmark.LEFT_KNEE
+            ankle = self.mp_pose.PoseLandmark.LEFT_ANKLE
+            shoulder = self.mp_pose.PoseLandmark.LEFT_SHOULDER
 
+        # Foot-wall
         shoulder_width = abs(
             lm[self.mp_pose.PoseLandmark.LEFT_SHOULDER].x
             - lm[self.mp_pose.PoseLandmark.RIGHT_SHOULDER].x
         ) + 1e-6
 
-        foot_wall = abs(lm[ank].x - lm[hip].x) / shoulder_width
-        return float(foot_wall)
+        foot_wall = abs(lm[ankle].x - lm[hip].x) / shoulder_width
+
+        # Knee angle
+        knee_angle = self.angle(
+            [lm[hip].x, lm[hip].y],
+            [lm[knee].x, lm[knee].y],
+            [lm[ankle].x, lm[ankle].y],
+        )
+
+        # Torso alignment
+        torso_alignment = abs(lm[shoulder].x - lm[hip].x)
+
+        return float(foot_wall), float(knee_angle), float(torso_alignment)
 
     @staticmethod
-    def aggregate_window(vals: List[float]) -> np.ndarray:
-        return np.array([np.mean(vals), np.std(vals), np.min(vals)], dtype=np.float32)
+    def aggregate_window(vals: List[Tuple[float, float, float]]) -> np.ndarray:
+        """
+        Aggregate window into final feature vector:
+        [
+            mean_fw,
+            std_fw,
+            mean_knee,
+            min_knee,
+            mean_torso
+        ]
+        """
+        fw = [v[0] for v in vals]
+        knee = [v[1] for v in vals]
+        torso = [v[2] for v in vals]
+
+        return np.array([
+            np.mean(fw),
+            np.std(fw),
+            np.mean(knee),
+            np.min(knee),
+            np.mean(torso),
+        ], dtype=np.float32)
+
 
 
 class StatusSender:
@@ -660,18 +710,23 @@ class WallSitWebSocketSession:
             )
             return
 
-        fw = self.feat.extract_foot_wall(res, self.st.chosen_side)
-        if fw is None:
+        feat_tuple = self.feat.extract_features(res, self.st.chosen_side)
+
+        if feat_tuple is None:
             self.st.foot_wall_vals.clear()
             await self.status.send_status(
                 self.ws,
                 self.st,
                 PHASE_BUFFERING,
-                {"chosen_side": self.st.chosen_side, "window_fill": 0, "window_size": self.window_frames},
+                {
+                    "chosen_side": self.st.chosen_side,
+                    "window_fill": 0,
+                    "window_size": self.window_frames,
+                },
             )
             return
 
-        self.st.foot_wall_vals.append(fw)
+        self.st.foot_wall_vals.append(feat_tuple)
 
         # Not enough frames yet => BUFFERING
         if len(self.st.foot_wall_vals) < self.window_frames:
@@ -800,3 +855,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
