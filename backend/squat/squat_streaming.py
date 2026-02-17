@@ -49,7 +49,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # -----------------------------
 # Config
 # -----------------------------
-TCN_MODEL_PATH   = "squat/models/feet_too_close_tcn.pt"   # bottom-event model
+TCN_MODEL_PATH   = "squat/models/squat_knees_in_tcn.pt"   # bottom-event model
 STAND_MODEL_PATH = "squat/models/feet_too_close_tcn.pt"   # standing model
 
 # Feature mode (must match both training checkpoints)
@@ -99,7 +99,7 @@ STAND_WIN_FRAMES     = PRE_FRAMES + POST_FRAMES + 1
 
 # Stand "OK" labels (must match your stand model label_map)
 # If your stand model outputs "stand_ok" when good, keep this.
-# If it outputs "dataset_correct", change to {"dataset_correct"}.
+# If it outputs "correct", change to {"correct"}.
 STAND_OK_LABELS = {"stand_ok"}
 
 # REP goal (frontend can decide; server just sends counts)
@@ -846,7 +846,7 @@ async def ws_video(websocket: WebSocket):
                         "saved_frames": st.saved_frames,
                         "reps": {
                             "total": int(st.total_reps),
-                            "dataset_correct": int(st.good_reps),
+                            "correct": int(st.good_reps),
                             "incorrect": int(st.bad_reps),
                             "goal_correct": int(GOAL_GOOD_REPS),
                         },
@@ -1042,7 +1042,7 @@ async def ws_video(websocket: WebSocket):
                     else f"StandPred(once): {st.last_stand_pred_label}"
                 )
 
-            rep_text = f"Reps dataset_correct/incorrect/total: {st.good_reps}/{st.bad_reps}/{st.total_reps} (goal dataset_correct={GOAL_GOOD_REPS})"
+            rep_text = f"Reps correct/incorrect/total: {st.good_reps}/{st.bad_reps}/{st.total_reps} (goal correct={GOAL_GOOD_REPS})"
 
             overlay = draw_overlay(
                 frame_bgr=frame,
@@ -1119,7 +1119,7 @@ async def ws_video(websocket: WebSocket):
                         "feature_mode": FEATURE_MODE,
                         "reps": {
                             "total": int(st.total_reps),
-                            "dataset_correct": int(st.good_reps),
+                            "correct": int(st.good_reps),
                             "incorrect": int(st.bad_reps),
                             "goal_correct": int(GOAL_GOOD_REPS),
 
@@ -1186,7 +1186,7 @@ async def ws_video(websocket: WebSocket):
                         "feature_mode": FEATURE_MODE,
                         "reps": {
                             "total": int(st.total_reps),
-                            "dataset_correct": int(st.good_reps),
+                            "correct": int(st.good_reps),
                             "incorrect": int(st.bad_reps),
                             "goal_correct": int(GOAL_GOOD_REPS),
 
