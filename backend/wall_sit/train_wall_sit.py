@@ -24,6 +24,7 @@ DATASET = {
     2: "feet_too_far",
     3: "back_of_wall",
     4: "not_deep_enough",
+    5: "standing",  # ใส่คลิปใน dataset/wall_sit/standing/ (ยืนเฉยๆ ใช้ knee angle แยกว่าย่อหรือยืน)
 }
 
 # -----------------------------
@@ -44,6 +45,7 @@ def extract_features(video_path):
     foot_wall_vals = []
     knee_angles = []
     torso_alignments = []
+    hip_angles = []  # shoulder-hip-knee: ยืน ~180°, ย่อ ~90–120° (สะโพกงอ)
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -73,7 +75,7 @@ def extract_features(video_path):
             ankle = lm[mp_pose.PoseLandmark.LEFT_ANKLE]
             shoulder = lm[mp_pose.PoseLandmark.LEFT_SHOULDER]
 
-        # 1️⃣ Foot to wall distance (horizontal)
+        # Foot to wall distance (horizontal)
         foot_wall_dist = abs(ankle.x - hip.x)
 
         shoulder_width = abs(
@@ -84,7 +86,7 @@ def extract_features(video_path):
         foot_wall_norm = foot_wall_dist / (shoulder_width + 1e-6)
         foot_wall_vals.append(foot_wall_norm)
 
-        # 2️⃣ Knee angle
+        # Knee angle
         knee_angle = angle(
             [hip.x, hip.y],
             [knee.x, knee.y],
@@ -92,9 +94,17 @@ def extract_features(video_path):
         )
         knee_angles.append(knee_angle)
 
-        # 3️⃣ Torso alignment (back against wall)
+        # Torso alignment (back against wall)
         torso_align = abs(shoulder.x - hip.x)
         torso_alignments.append(torso_align)
+
+        # Hip angle (shoulder-hip-knee):
+        hip_ang = angle(
+            [shoulder.x, shoulder.y],
+            [hip.x, hip.y],
+            [knee.x, knee.y]
+        )
+        hip_angles.append(hip_ang)
 
     cap.release()
 
@@ -107,6 +117,8 @@ def extract_features(video_path):
         np.mean(knee_angles),
         np.min(knee_angles),
         np.mean(torso_alignments),
+        np.mean(hip_angles),
+        np.min(hip_angles),
     ]
 
     return feat
@@ -142,14 +154,12 @@ print("Classes:", np.unique(y))
 # -----------------------------
 model = Pipeline([
     ("scaler", StandardScaler()),
-    ("clf", LogisticRegression(
-        multi_class="multinomial",
-        solver="lbfgs",
-        max_iter=2000
-    ))
+    ("clf", LogisticRegression(solver="lbfgs", max_iter=2000)),
 ])
 
 model.fit(X, y)
 
-joblib.dump(model, "wall_sit_model.pkl")
-print("Model saved: wall_sit_model.pkl")
+out_path = os.path.join(os.path.dirname(__file__), "models", "wall_sit_model.pkl")
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+joblib.dump(model, out_path)
+print("Model saved:", out_path)
