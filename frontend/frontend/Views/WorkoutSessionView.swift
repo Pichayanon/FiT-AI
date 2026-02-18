@@ -55,6 +55,16 @@ struct WorkoutSessionView: View {
                         .transition(.opacity)
                 }
 
+                if viewModel.showPlankPreview {
+                    plankPreviewOverlay
+                        .transition(.opacity)
+                }
+
+                if viewModel.showWallSitPreview {
+                    wallSitPreviewOverlay
+                        .transition(.opacity)
+                }
+
                 if showLightAdjustOverlay {
                     lightAdjustOverlay
                         .transition(.opacity)
@@ -88,10 +98,10 @@ struct WorkoutSessionView: View {
         }
     }
 
-    // MARK: - Center Guide
+    // MARK: - Center Guide (first exercise is plank)
     private var guideCenterOverlay: some View {
         VStack(spacing: 12) {
-            WallSitGuideOverlayCompact()
+            PlankGuideOverlayCompact()
 
             Text("Set camera to SIDE VIEW\nPress Start when ready")
                 .font(.subheadline.weight(.semibold))
@@ -115,6 +125,50 @@ struct WorkoutSessionView: View {
                 SquatGuideOverlayCompact()
 
                 Text("Next: Squat\nStarting in \(viewModel.squatPreviewSeconds)s")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .padding(.horizontal, 18)
+            .offset(y: -40)
+        }
+    }
+
+    // MARK: - Plank Preview Overlay
+    private var plankPreviewOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.45).ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                PlankGuideOverlayCompact()
+
+                Text("Next: Plank\nStarting in \(viewModel.plankPreviewSeconds)s")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .padding(.horizontal, 18)
+            .offset(y: -40)
+        }
+    }
+
+    // MARK: - Wall-Sit Preview Overlay (after plank)
+    private var wallSitPreviewOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.45).ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                WallSitGuideOverlayCompact()
+
+                Text("Next: Wall-Sit\nStarting in \(viewModel.wallSitPreviewSeconds)s")
                     .font(.subheadline.weight(.semibold))
                     .foregroundColor(.white)
                     .multilineTextAlignment(.center)
@@ -255,6 +309,11 @@ struct WorkoutSessionView: View {
         return "Get 3x Correct to start"
     }
 
+    private var plankTitleText: String {
+        if viewModel.passedPlank { return viewModel.showWallSitPreview ? "PASSED ✅ (Next: Wall-Sit)" : "PASSED ✅ (Switching…)" }
+        return "Plank Goal"
+    }
+
     private var squatProgressCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -280,7 +339,7 @@ struct WorkoutSessionView: View {
     private var plankProgressCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Plank Goal")
+                Text(plankTitleText)
                     .font(.caption.weight(.semibold))
                     .foregroundColor(.white)
                 Spacer()
@@ -441,6 +500,27 @@ private struct SquatGuideOverlayCompact: View {
                     .background(Color.black.opacity(0.45))
                     .clipShape(Capsule())
             }
+        }
+    }
+}
+
+// MARK: - Guide Overlay Compact (Plank)
+private struct PlankGuideOverlayCompact: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            Image("plank_01")
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: 260, maxHeight: 200)
+                .shadow(radius: 10)
+
+            Text("Hold straight • Side view")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.black.opacity(0.45))
+                .clipShape(Capsule())
         }
     }
 }

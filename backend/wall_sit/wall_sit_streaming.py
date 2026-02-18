@@ -628,7 +628,7 @@ class WallSitWebSocketSession:
             ):
                 await self.status.send_info(
                     self.ws,
-                    "Please Adjust Your Pose",
+                    "Show your body",
                     {"brightness_mean": round(brightness_mean, 1), "brightness_th": DARK_BRIGHTNESS_TH},
                 )
                 self.st.no_pose_alerted = True
