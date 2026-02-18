@@ -48,6 +48,7 @@ import cv2
 import joblib
 import mediapipe as mp
 import numpy as np
+from typing import List, Tuple
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -55,7 +56,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # -----------------------------
 # Config
 # -----------------------------
-MODEL_PATH = "/Users/pichayanon/Desktop/FiT-AI/backend/wall_sit/models/wall_sit_model.pkl"
+MODEL_PATH = "wall_sit/models/wall_sit_model.pkl"
 
 LABELS: Dict[int, str] = {
     0: "correct",
@@ -63,8 +64,8 @@ LABELS: Dict[int, str] = {
     2: "feet_too_far",
     3: "back_of_wall",
     4: "not_deep_enough",
-    5: "standing",
 }
+
 
 WINDOW_FRAMES = 15          # frames per window
 READY_STREAK_N = 3          # require side landmarks N consecutive frames
@@ -96,6 +97,11 @@ DARK_ADJUST_SECONDS = 5.0
 # Mean grayscale brightness threshold (0..255). Lower = darker.
 DARK_BRIGHTNESS_TH = 55.0
 
+# Standing gate (avoid predicting while user stands upright)
+# knee_angle ~ 165–180° => standing (not in wall-sit yet)
+STAND_KNEE_ANGLE_DEG_TH = 165.0
+STAND_STREAK_N = 3
+
 
 # -----------------------------
 # App
@@ -117,10 +123,8 @@ app.add_middleware(
 @dataclass
 class StreamState:
     started: bool = False
-    foot_wall_vals: List[float] = field(default_factory=list)
-    knee_angles: List[float] = field(default_factory=list)
-    torso_alignments: List[float] = field(default_factory=list)
-    hip_angles: List[float] = field(default_factory=list)
+    foot_wall_vals: List[Tuple[float, float, float]] = field(default_factory=list)
+    stand_streak: int = 0
 
     # gate
     ready: bool = False
@@ -315,23 +319,23 @@ class SideGate:
         return None, debug
 
 
-def _angle_deg(a: List[float], b: List[float], c: List[float]) -> float:
-    """Angle at b (in degrees). a, b, c are [x, y] or [x, y, z]."""
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    ba, bc = a - b, c - b
-    cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
-    return float(np.degrees(np.arccos(np.clip(cos, -1, 1))))
-
-
 class FeatureExtractor:
-    """Extract per-frame features used by the model (match train_wall_sit.py)."""
+    """Extract per-frame features used by the 5-class model."""
 
     def __init__(self, mp_pose: Any) -> None:
         self.mp_pose = mp_pose
 
-    def extract_foot_wall(self, res: Any, side: str) -> Optional[float]:
+    @staticmethod
+    def angle(a, b, c):
+        a, b, c = np.array(a), np.array(b), np.array(c)
+        ba, bc = a - b, c - b
+        cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
+        return np.degrees(np.arccos(np.clip(cos, -1, 1)))
+
+    def extract_features(self, res: Any, side: str) -> Optional[Tuple[float, float, float]]:
         """
-        foot_wall = |ankle.x - hip.x| / shoulder_width
+        Returns:
+        (foot_wall_norm, knee_angle, torso_alignment)
         """
         if not res.pose_landmarks:
             return None
@@ -340,86 +344,59 @@ class FeatureExtractor:
 
         if side == "right":
             hip = self.mp_pose.PoseLandmark.RIGHT_HIP
-            ank = self.mp_pose.PoseLandmark.RIGHT_ANKLE
+            knee = self.mp_pose.PoseLandmark.RIGHT_KNEE
+            ankle = self.mp_pose.PoseLandmark.RIGHT_ANKLE
+            shoulder = self.mp_pose.PoseLandmark.RIGHT_SHOULDER
         else:
             hip = self.mp_pose.PoseLandmark.LEFT_HIP
-            ank = self.mp_pose.PoseLandmark.LEFT_ANKLE
+            knee = self.mp_pose.PoseLandmark.LEFT_KNEE
+            ankle = self.mp_pose.PoseLandmark.LEFT_ANKLE
+            shoulder = self.mp_pose.PoseLandmark.LEFT_SHOULDER
 
+        # Foot-wall
         shoulder_width = abs(
             lm[self.mp_pose.PoseLandmark.LEFT_SHOULDER].x
             - lm[self.mp_pose.PoseLandmark.RIGHT_SHOULDER].x
         ) + 1e-6
 
-        foot_wall = abs(lm[ank].x - lm[hip].x) / shoulder_width
-        return float(foot_wall)
+        foot_wall = abs(lm[ankle].x - lm[hip].x) / shoulder_width
 
-    def extract_knee_angle(self, res: Any, side: str) -> Optional[float]:
-        """Knee angle (hip-knee-ankle) in degrees. ยืน ~180°, ย่อ ~90°."""
-        if not res.pose_landmarks:
-            return None
-        lm = res.pose_landmarks.landmark
-        if side == "right":
-            hip = lm[self.mp_pose.PoseLandmark.RIGHT_HIP]
-            knee = lm[self.mp_pose.PoseLandmark.RIGHT_KNEE]
-            ankle = lm[self.mp_pose.PoseLandmark.RIGHT_ANKLE]
-        else:
-            hip = lm[self.mp_pose.PoseLandmark.LEFT_HIP]
-            knee = lm[self.mp_pose.PoseLandmark.LEFT_KNEE]
-            ankle = lm[self.mp_pose.PoseLandmark.LEFT_ANKLE]
-        return _angle_deg([hip.x, hip.y], [knee.x, knee.y], [ankle.x, ankle.y])
+        # Knee angle
+        knee_angle = self.angle(
+            [lm[hip].x, lm[hip].y],
+            [lm[knee].x, lm[knee].y],
+            [lm[ankle].x, lm[ankle].y],
+        )
 
-    def extract_torso_alignment(self, res: Any, side: str) -> Optional[float]:
-        """|shoulder.x - hip.x| for back-against-wall."""
-        if not res.pose_landmarks:
-            return None
-        lm = res.pose_landmarks.landmark
-        if side == "right":
-            shoulder = lm[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
-            hip = lm[self.mp_pose.PoseLandmark.RIGHT_HIP]
-        else:
-            shoulder = lm[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
-            hip = lm[self.mp_pose.PoseLandmark.LEFT_HIP]
-        return float(abs(shoulder.x - hip.x))
+        # Torso alignment
+        torso_alignment = abs(lm[shoulder].x - lm[hip].x)
 
-    def extract_hip_angle(self, res: Any, side: str) -> Optional[float]:
-        """Hip angle (shoulder-hip-knee) in degrees. ยืนตรง ~180°, ย่อ/นั่ง ~90–120°."""
-        if not res.pose_landmarks:
-            return None
-        lm = res.pose_landmarks.landmark
-        if side == "right":
-            shoulder = lm[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
-            hip = lm[self.mp_pose.PoseLandmark.RIGHT_HIP]
-            knee = lm[self.mp_pose.PoseLandmark.RIGHT_KNEE]
-        else:
-            shoulder = lm[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
-            hip = lm[self.mp_pose.PoseLandmark.LEFT_HIP]
-            knee = lm[self.mp_pose.PoseLandmark.LEFT_KNEE]
-        return _angle_deg([shoulder.x, shoulder.y], [hip.x, hip.y], [knee.x, knee.y])
+        return float(foot_wall), float(knee_angle), float(torso_alignment)
 
     @staticmethod
-    def aggregate_window(
-        foot_wall_vals: List[float],
-        knee_angles: List[float],
-        torso_alignments: List[float],
-        hip_angles: List[float],
-    ) -> np.ndarray:
-        """Match train_wall_sit.py: [mean(fw), std(fw), mean(knee), min(knee), mean(torso), mean(hip), min(hip)]."""
-        fw = np.array(foot_wall_vals, dtype=np.float64)
-        knee = np.array(knee_angles, dtype=np.float64)
-        torso = np.array(torso_alignments, dtype=np.float64)
-        hip = np.array(hip_angles, dtype=np.float64)
-        return np.array(
-            [
-                float(np.mean(fw)),
-                float(np.std(fw)) if len(fw) > 1 else 0.0,
-                float(np.mean(knee)),
-                float(np.min(knee)),
-                float(np.mean(torso)),
-                float(np.mean(hip)),
-                float(np.min(hip)),
-            ],
-            dtype=np.float32,
-        )
+    def aggregate_window(vals: List[Tuple[float, float, float]]) -> np.ndarray:
+        """
+        Aggregate window into final feature vector:
+        [
+            mean_fw,
+            std_fw,
+            mean_knee,
+            min_knee,
+            mean_torso
+        ]
+        """
+        fw = [v[0] for v in vals]
+        knee = [v[1] for v in vals]
+        torso = [v[2] for v in vals]
+
+        return np.array([
+            np.mean(fw),
+            np.std(fw),
+            np.mean(knee),
+            np.min(knee),
+            np.mean(torso),
+        ], dtype=np.float32)
+
 
 
 class StatusSender:
@@ -483,8 +460,6 @@ class WallSitWebSocketSession:
         self.debug = debug
 
         self.st = StreamState()
-        self._latency_samples: List[Tuple[float, float]] = []  # (wall_time, frame_total_ms)
-        self._last_avg_print_t: float = 0.0
 
         self.mp_pose = mp.solutions.pose
         self.pose = self.mp_pose.Pose(
@@ -545,8 +520,6 @@ class WallSitWebSocketSession:
     async def _handle_start(self) -> None:
         self.st = StreamState(started=True)
         self.st.session_id = str(int(time.time() * 1000))
-        self._latency_samples = []
-        self._last_avg_print_t = 0.0
 
         self.st.no_pose_since = None
         self.st.no_pose_alerted = False
@@ -569,9 +542,7 @@ class WallSitWebSocketSession:
 
     def _reset_gate_and_buffers(self, reset_watchdog: bool) -> None:
         self.st.foot_wall_vals.clear()
-        self.st.knee_angles.clear()
-        self.st.torso_alignments.clear()
-        self.st.hip_angles.clear()
+        self.st.stand_streak = 0
         self.st.ready = False
         self.st.ready_streak = 0
         self.st.chosen_side = None
@@ -590,7 +561,6 @@ class WallSitWebSocketSession:
             self.st.dark_alerted = False
 
     async def _handle_frame(self, data: Dict[str, Any]) -> None:
-        t_frame_start = time.perf_counter()
         if not self.st.started:
             return
 
@@ -658,7 +628,7 @@ class WallSitWebSocketSession:
             ):
                 await self.status.send_info(
                     self.ws,
-                    "Step back so the camera can see your full body",
+                    "Please Adjust Your Pose",
                     {"brightness_mean": round(brightness_mean, 1), "brightness_th": DARK_BRIGHTNESS_TH},
                 )
                 self.st.no_pose_alerted = True
@@ -714,9 +684,6 @@ class WallSitWebSocketSession:
         if (not self.st.ready) and (self.st.ready_streak >= self.ready_streak_n):
             self.st.ready = True
             self.st.foot_wall_vals.clear()
-            self.st.knee_angles.clear()
-            self.st.torso_alignments.clear()
-            self.st.hip_angles.clear()
 
             # reset last sent (if you previously used dedup)
             self.st.last_sent_label = ""
@@ -750,31 +717,56 @@ class WallSitWebSocketSession:
             )
             return
 
-        fw = self.feat.extract_foot_wall(res, self.st.chosen_side)
-        knee = self.feat.extract_knee_angle(res, self.st.chosen_side)
-        torso = self.feat.extract_torso_alignment(res, self.st.chosen_side)
-        hip_ang = self.feat.extract_hip_angle(res, self.st.chosen_side)
-        print(f"FW {fw}")
-        print(f"KNEE {knee}")
-        print(f"TORSO {torso}")
-        print(f"HIP ANG {hip_ang}")
-        if fw is None or knee is None or torso is None or hip_ang is None:
+        feat_tuple = self.feat.extract_features(res, self.st.chosen_side)
+
+        if feat_tuple is None:
             self.st.foot_wall_vals.clear()
-            self.st.knee_angles.clear()
-            self.st.torso_alignments.clear()
-            self.st.hip_angles.clear()
+            self.st.stand_streak = 0
             await self.status.send_status(
                 self.ws,
                 self.st,
                 PHASE_BUFFERING,
-                {"chosen_side": self.st.chosen_side, "window_fill": 0, "window_size": self.window_frames},
+                {
+                    "chosen_side": self.st.chosen_side,
+                    "window_fill": 0,
+                    "window_size": self.window_frames,
+                },
             )
             return
 
-        self.st.foot_wall_vals.append(fw)
-        self.st.knee_angles.append(knee)
-        self.st.torso_alignments.append(torso)
-        self.st.hip_angles.append(hip_ang)
+        # Standing gate: when knee angle is near-straight, don't run wall-sit classifier yet
+        knee_angle = float(feat_tuple[1])
+        if knee_angle >= STAND_KNEE_ANGLE_DEG_TH:
+            self.st.stand_streak += 1
+        else:
+            self.st.stand_streak = 0
+
+        if self.st.stand_streak >= STAND_STREAK_N:
+            if self.st.stand_streak == STAND_STREAK_N:
+                print(
+                    f"[WALLSIT] STANDING gate: session_id={self.st.session_id} "
+                    f"side={self.st.chosen_side} knee_angle={knee_angle:.1f} th={STAND_KNEE_ANGLE_DEG_TH}"
+                )
+            # clear buffers so we don't mix standing frames with wall-sit frames
+            self.st.foot_wall_vals.clear()
+            await self.status.send_status(
+                self.ws,
+                self.st,
+                PHASE_HAVE_POSE,
+                {
+                    "chosen_side": self.st.chosen_side,
+                    "ready_streak": self.st.ready_streak,
+                    "needed_streak": self.ready_streak_n,
+                    "window_fill": 0,
+                    "window_size": self.window_frames,
+                    "standing": True,
+                    "knee_angle": round(knee_angle, 1),
+                    "knee_th": STAND_KNEE_ANGLE_DEG_TH,
+                },
+            )
+            return
+
+        self.st.foot_wall_vals.append(feat_tuple)
 
         # Not enough frames yet => BUFFERING
         if len(self.st.foot_wall_vals) < self.window_frames:
@@ -802,29 +794,11 @@ class WallSitWebSocketSession:
             },
         )
 
-        t_infer_start = time.perf_counter()
-        fw_vals = self.st.foot_wall_vals[-self.window_frames:]
-        knee_vals = self.st.knee_angles[-self.window_frames:]
-        torso_vals = self.st.torso_alignments[-self.window_frames:]
-        hip_vals = self.st.hip_angles[-self.window_frames:]
-        agg_feat = self.feat.aggregate_window(fw_vals, knee_vals, torso_vals, hip_vals)
+        vals = self.st.foot_wall_vals[-self.window_frames:]
+        agg_feat = self.feat.aggregate_window(vals)
+
         pred_id, conf = self.model_svc.predict(agg_feat)
-        t_infer_end = time.perf_counter()
         pred_label = self.labels.label_of(pred_id)
-
-        frame_total_ms = (t_infer_end - t_frame_start) * 1000
-        inference_ms = (t_infer_end - t_infer_start) * 1000
-        print(f"[WALLSIT latency] frame_total_ms={frame_total_ms:.1f} inference_ms={inference_ms:.1f} pred={pred_label}")
-
-        now_wall = time.time()
-        self._latency_samples.append((now_wall, frame_total_ms))
-        cutoff = now_wall - 1.0
-        self._latency_samples = [(t, ms) for t, ms in self._latency_samples if t >= cutoff]
-        if now_wall - self._last_avg_print_t >= 1.0:
-            if self._latency_samples:
-                avg_ms = sum(ms for _, ms in self._latency_samples) / len(self._latency_samples)
-                print(f"[WALLSIT] AVERAGE LATENCY OF 1 SEC: {avg_ms:.1f} ms (n={len(self._latency_samples)})")
-            self._last_avg_print_t = now_wall
 
         self.st.last_pred_label = pred_label
         self.st.last_pred_conf = conf
@@ -842,13 +816,9 @@ class WallSitWebSocketSession:
             print(f"[PRED] {payload}")
         await self.ws.send_text(json.dumps(payload))
 
-        # keep lists bounded (avoid growing forever)
-        max_len = self.window_frames + 60
-        if len(self.st.foot_wall_vals) > max_len:
-            self.st.foot_wall_vals = self.st.foot_wall_vals[-max_len:]
-            self.st.knee_angles = self.st.knee_angles[-max_len:]
-            self.st.torso_alignments = self.st.torso_alignments[-max_len:]
-            self.st.hip_angles = self.st.hip_angles[-max_len:]
+        # keep list bounded (avoid growing forever)
+        if len(self.st.foot_wall_vals) > (self.window_frames + 60):
+            self.st.foot_wall_vals = self.st.foot_wall_vals[-(self.window_frames + 60):]
 
 
 # -----------------------------
@@ -925,3 +895,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
