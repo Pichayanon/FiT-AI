@@ -60,11 +60,6 @@ struct WorkoutSessionView: View {
                         .transition(.opacity)
                 }
 
-                if viewModel.showWallSitPreview {
-                    wallSitPreviewOverlay
-                        .transition(.opacity)
-                }
-
                 if showLightAdjustOverlay {
                     lightAdjustOverlay
                         .transition(.opacity)
@@ -98,10 +93,10 @@ struct WorkoutSessionView: View {
         }
     }
 
-    // MARK: - Center Guide (first exercise is plank)
+    // MARK: - Center Guide (first exercise is wall-sit)
     private var guideCenterOverlay: some View {
         VStack(spacing: 12) {
-            PlankGuideOverlayCompact()
+            WallSitGuideOverlayCompact()
 
             Text("Set camera to SIDE VIEW\nPress Start when ready")
                 .font(.subheadline.weight(.semibold))
@@ -147,28 +142,6 @@ struct WorkoutSessionView: View {
                 PlankGuideOverlayCompact()
 
                 Text("Next: Plank\nStarting in \(viewModel.plankPreviewSeconds)s")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .background(Color.black.opacity(0.45))
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-            .padding(.horizontal, 18)
-            .offset(y: -40)
-        }
-    }
-
-    // MARK: - Wall-Sit Preview Overlay (after plank)
-    private var wallSitPreviewOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.45).ignoresSafeArea()
-
-            VStack(spacing: 12) {
-                WallSitGuideOverlayCompact()
-
-                Text("Next: Wall-Sit\nStarting in \(viewModel.wallSitPreviewSeconds)s")
                     .font(.subheadline.weight(.semibold))
                     .foregroundColor(.white)
                     .multilineTextAlignment(.center)
@@ -310,7 +283,7 @@ struct WorkoutSessionView: View {
     }
 
     private var plankTitleText: String {
-        if viewModel.passedPlank { return viewModel.showWallSitPreview ? "PASSED ✅ (Next: Wall-Sit)" : "PASSED ✅ (Switching…)" }
+        if viewModel.passedPlank { return "PASSED ✅" }
         return "Plank Goal"
     }
 
@@ -447,31 +420,28 @@ private struct TopHUD: View {
     }
 }
 
-// MARK: - Guide Overlay Compact (Wall-Sit)
+// MARK: - Guide Overlay Compact (Wall-Sit) — Stand → Lower → Hold
 private struct WallSitGuideOverlayCompact: View {
     private let frames = ["wall_01", "wall_02", "wall_03"]
-    @State private var idx: Int = 0
-    private let timer = Timer.publish(every: 1.1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        VStack(spacing: 10) {
-            Image(frames[idx])
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: 260, maxHeight: 200)
-                .shadow(radius: 10)
+        TimelineView(.periodic(from: Date(), by: 1.1)) { context in
+            let idx = Int(context.date.timeIntervalSince1970 / 1.1) % frames.count
+            VStack(spacing: 10) {
+                Image(frames[idx])
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 260, maxHeight: 200)
+                    .shadow(radius: 10)
+                    .animation(.easeInOut(duration: 0.2), value: idx)
 
-            Text("Stand → Lower → Hold")
-                .font(.caption.weight(.semibold))
-                .foregroundColor(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color.black.opacity(0.45))
-                .clipShape(Capsule())
-        }
-        .onReceive(timer) { _ in
-            withAnimation(.easeInOut(duration: 0.2)) {
-                idx = (idx + 1) % frames.count
+                Text("Stand → Lower → Hold")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(Capsule())
             }
         }
     }
