@@ -343,7 +343,7 @@ struct WorkoutSessionView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundColor(.white)
                 Spacer()
-                Text("\(String(format: \"%.1f\", viewModel.plankCorrectSeconds)) / \(String(format: \"%.1f\", viewModel.plankTargetSeconds)) s")
+                Text(String(format: "%.1f", viewModel.plankCorrectSeconds) + " / " + String(format: "%.1f", viewModel.plankTargetSeconds) + " s")
                     .font(.caption2.weight(.bold))
                     .foregroundColor(.white.opacity(0.9))
                     .monospacedDigit()
