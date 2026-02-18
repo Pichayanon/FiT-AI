@@ -46,6 +46,11 @@ POST_FRAMES = 5
 
 MIN_GAP = 18  # min frames between bottom events (eccentric→concentric)
 
+# Stand gate (rule-based): only used to decide when to run stand model
+# Robust: knees near-straight + stable (not currently moving)
+STAND_KNEE_ANGLE_DEG_TH = 170.0
+STAND_KNEE_DELTA_MAX_DEG = 2.0
+
 READY_STREAK_N = 3
 
 FRONT_VIS_TH = 0.6
@@ -478,6 +483,7 @@ def draw_overlay(
     knee_ema: Optional[float],
     pred_text: Optional[str] = None,
     extra_text: Optional[str] = None,
+    stand_gate_text: Optional[str] = None,
     stand_pred_text: Optional[str] = None,
     rep_text: Optional[str] = None,
     feat_dim: Optional[int] = None,
@@ -508,12 +514,15 @@ def draw_overlay(
     put(f"Phase: {phase}")
     put(f"Knee: {knee_raw:.1f}" if knee_raw is not None else "Knee: NA")
     put(
-        f"feat={FEATURE_MODE} dim={feat_dim} | bottom=ecc→conc stand=phase pre/post={PRE_FRAMES}/{POST_FRAMES}",
+        f"feat={FEATURE_MODE} dim={feat_dim} | bottom=ecc→conc stand=knee>={STAND_KNEE_ANGLE_DEG_TH:.0f} & Δ<={STAND_KNEE_DELTA_MAX_DEG:.1f}",
         0.55
     )
 
     if extra_text:
         put(extra_text, 0.6)
+
+    if stand_gate_text:
+        put(stand_gate_text, 0.6)
 
     if rep_text:
         put(rep_text, 0.65)
@@ -750,6 +759,7 @@ class StreamState:
 
     # standing predict state (CHECK ONCE ONLY)
     stand_streak: int = 0
+    prev_knee_raw: Optional[float] = None
     last_stand_pred_i: int = -10**9
     last_stand_pred_label: str = ""
     last_stand_pred_conf: Optional[float] = None
@@ -967,6 +977,7 @@ class SquatWebSocketSession:
         self.st.pending = None
         self.st.stand_ok = False
         self.st.stand_streak = 0
+        self.st.prev_knee_raw = None
         self.st.last_stand_pred_i = -10**9
         self.st.last_stand_pred_label = ""
         self.st.last_stand_pred_conf = None
@@ -1013,6 +1024,7 @@ class SquatWebSocketSession:
             self.st.ready = False
             self.st.ready_streak = 0
             self.st.stand_streak = 0
+            self.st.prev_knee_raw = None
             self.st.last_gate_debug = {}
             self.st.hist.clear()
             self.st.phase_feat_buffer.clear()
@@ -1032,6 +1044,7 @@ class SquatWebSocketSession:
             self.st.ready = False
             self.st.ready_streak = 0
             self.st.stand_streak = 0
+            self.st.prev_knee_raw = None
             self.st.hist.clear()
             self.st.phase_feat_buffer.clear()
             self.st.prev_phase = ""
@@ -1080,6 +1093,7 @@ class SquatWebSocketSession:
             self.st.prev_phase = ""
             self.st.last_phase_bottom_i = -10**9
             self.st.pending = None
+            self.st.prev_knee_raw = None
             self.st.last_sent_bottom_event_i = -10**9
             self.st.last_sent_stand_label = ""
             await self.status.send_info(self.ws, "Front view ready", {"session_id": self.st.session_id, "gate": gate_dbg if self.debug else None})
@@ -1130,6 +1144,20 @@ class SquatWebSocketSession:
         knee_r = angle_3pts(rhip, rknee, rank)
         knee_raw = float((knee_l + knee_r) * 0.5)
 
+        # Rule-based stand gate (robust): near-straight knees + stable
+        knee_delta = abs(knee_raw - self.st.prev_knee_raw) if self.st.prev_knee_raw is not None else 0.0
+        is_stand = (knee_raw >= STAND_KNEE_ANGLE_DEG_TH) and (knee_delta <= STAND_KNEE_DELTA_MAX_DEG)
+        self.st.prev_knee_raw = knee_raw
+        if is_stand:
+            self.st.stand_streak += 1
+        else:
+            self.st.stand_streak = 0
+        stand_gate_text = (
+            f"STAND_GATE: {'YES' if is_stand else 'no'} "
+            f"streak {self.st.stand_streak}/{STAND_MIN_STREAK} "
+            f"knee={knee_raw:.1f} Δ={knee_delta:.1f}"
+        )
+
         feat = self.feat.extract(lm)
 
         self.st.phase_feat_buffer.append(extract_phase_features(lm))
@@ -1148,12 +1176,7 @@ class SquatWebSocketSession:
         self.st.prev_phase = phase
 
         self.st.hist.append((self.frame_i, feat, frame.copy(), knee_raw, None))
-
-        is_stand = (phase == "eccentric")
-        if is_stand:
-            self.st.stand_streak += 1
-        else:
-            self.st.stand_streak = 0
+        # NOTE: stand_streak is maintained by the stand gate above
 
         pred_text = ""
         if self.st.last_pred_label:
@@ -1180,6 +1203,7 @@ class SquatWebSocketSession:
             knee_ema=None,
             pred_text=pred_text if pred_text else None,
             extra_text=(f"EVENT bottom @ {event_i}" if event_i is not None else None),
+            stand_gate_text=stand_gate_text,
             stand_pred_text=stand_pred_text if stand_pred_text else None,
             rep_text=rep_text,
             feat_dim=int(feat.shape[0]),
