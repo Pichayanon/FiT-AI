@@ -4,7 +4,7 @@ import SwiftUI
 /// ViewModel สำหรับจัดการ state + business logic ของ `WorkoutSessionView`
 @MainActor
 final class WorkoutSessionViewModel: ObservableObject {
-    enum Mode { case wallSit, squat }
+    enum Mode { case wallSit, squat, plank }
 
     // ✅ Backend phases (match Python)
     private enum BackendPhase: String {
@@ -48,12 +48,23 @@ final class WorkoutSessionViewModel: ObservableObject {
     @Published var wallSitCountingActive: Bool = false
     @Published var wallSitIsCorrectHold: Bool = false
 
+    // Plank hold progress
+    @Published var plankCorrectSeconds: Double = 0
+    @Published var plankTargetSeconds: Double = 5.0
+    @Published var passedPlank: Bool = false
+
+    // Gate: ต้อง correct 3 ครั้งติด (สำหรับ Plank)
+    @Published var plankConsecutiveCorrect: Int = 0
+    @Published var plankCountingActive: Bool = false
+    @Published var plankIsCorrectHold: Bool = false
+
     // Squat preview
     @Published var showSquatPreview: Bool = false
     @Published var squatPreviewSeconds: Int = 5
 
     // Auto switch control
     @Published var didSwitchToSquat: Bool = false
+    @Published var didSwitchToPlank: Bool = false
 
     // Squat target: correct 3 reps = finish
     @Published var squatTargetCorrectReps: Int = 3
@@ -67,15 +78,23 @@ final class WorkoutSessionViewModel: ObservableObject {
     /// นับจำนวนครั้งที่ผิดแต่ละประเภทใน wall-sit (label จาก backend → count)
     private var wallSitErrorCounts: [String: Int] = [:]
 
+    /// นับจำนวนครั้งที่ผิดแต่ละประเภทใน plank (label จาก backend → count)
+    private var plankErrorCounts: [String: Int] = [:]
+
     // MARK: - Constants
     private let speechLang = "en-US"
 
     // WS endpoints
     private let wsWallSitURL = "ws://172.20.10.5:5050/ws/video"
     private let wsSquatURL   = "ws://172.20.10.5:5051/ws/video"
+    private let wsPlankURL   = "ws://172.20.10.5:5052/ws/video"
 
     private var activeWSURL: String {
-        mode == .wallSit ? wsWallSitURL : wsSquatURL
+        switch mode {
+        case .wallSit: return wsWallSitURL
+        case .squat:   return wsSquatURL
+        case .plank:   return wsPlankURL
+        }
     }
 
     // ปรับ threshold ตามโมเดลจริงของคุณ
@@ -95,10 +114,16 @@ final class WorkoutSessionViewModel: ObservableObject {
         return min(1.0, max(0.0, Double(correctReps) / tgt))
     }
 
+    var plankProgress01: Double {
+        guard plankTargetSeconds > 0 else { return 0 }
+        return min(1.0, max(0.0, plankCorrectSeconds / plankTargetSeconds))
+    }
+
     var titleForHUD: String {
         switch mode {
         case .wallSit: return "\(setTitle) • Wall-Sit"
         case .squat:   return "\(setTitle) • Squat"
+        case .plank:   return "\(setTitle) • Plank"
         }
     }
 
@@ -133,6 +158,7 @@ final class WorkoutSessionViewModel: ObservableObject {
         // reset ALL
         mode = .wallSit
         didSwitchToSquat = false
+        didSwitchToPlank = false
         passedWallSit = false
 
         // preview
@@ -152,6 +178,14 @@ final class WorkoutSessionViewModel: ObservableObject {
         wallSitCountingActive = false
         wallSitIsCorrectHold = false
 
+        // plank progress
+        plankCorrectSeconds = 0
+        plankTargetSeconds = 5.0
+        plankConsecutiveCorrect = 0
+        plankCountingActive = false
+        plankIsCorrectHold = false
+        passedPlank = false
+
         // squat helpers
         squatStandOK = false
         squatStarted = false
@@ -159,6 +193,7 @@ final class WorkoutSessionViewModel: ObservableObject {
         lastPleaseStartAt = .distantPast
 
         wallSitErrorCounts = [:]
+        plankErrorCounts = [:]
 
         cameraManager.startStreaming(to: activeWSURL)
         speech.speak("Session started", language: speechLang, minInterval: 0)
@@ -215,6 +250,18 @@ final class WorkoutSessionViewModel: ObservableObject {
             incorrectReps: incorrectReps,
             targetCorrectReps: squatTargetCorrectReps,
             errors: squatErrors
+        ))
+
+        // Plank (isometric)
+        let plankErrors: [ErrorCount] = plankErrorCounts
+            .filter { $0.value > 0 }
+            .map { ErrorCount(reason: Self.displayLabel(for: $0.key), count: $0.value) }
+            .sorted { $0.count > $1.count }
+        items.append(.isometric(
+            name: "Plank",
+            durationSeconds: plankCorrectSeconds,
+            targetSeconds: plankTargetSeconds,
+            errors: plankErrors
         ))
 
         return SessionSummary(items: items, totalTimeSeconds: totalTime, estimatedCalories: calories)
@@ -323,6 +370,29 @@ final class WorkoutSessionViewModel: ObservableObject {
         speech.speak("Switch to squat", language: speechLang, minInterval: 0)
     }
 
+    private func switchToPlank() {
+        guard isSessionRunning else { return }
+        guard !didSwitchToPlank else { return }
+
+        didSwitchToPlank = true
+        mode = .plank
+        backendState = BackendPhase.NO_POSE.rawValue
+        setFeedbackIfChanged("Switching to Plank…")
+
+        // reset plank counters
+        plankCorrectSeconds = 0
+        plankTargetSeconds = 5.0
+        plankConsecutiveCorrect = 0
+        plankCountingActive = false
+        plankIsCorrectHold = false
+        passedPlank = false
+
+        cameraManager.stopStreaming()
+        cameraManager.startStreaming(to: activeWSURL)
+
+        speech.speak("Switch to plank", language: speechLang, minInterval: 0)
+    }
+
     // MARK: - Backend Message
     private func handleBackendMessage(_ text: String) {
         guard let data = text.data(using: .utf8),
@@ -346,6 +416,11 @@ final class WorkoutSessionViewModel: ObservableObject {
                         self.wallSitCountingActive = false
                         self.wallSitConsecutiveCorrect = 0
                         self.correctSeconds = 0
+                    } else if self.mode == .plank {
+                        self.plankIsCorrectHold = false
+                        self.plankCountingActive = false
+                        self.plankConsecutiveCorrect = 0
+                        self.plankCorrectSeconds = 0
                     }
                 }
 
@@ -421,10 +496,16 @@ final class WorkoutSessionViewModel: ObservableObject {
                         }
 
                         if self.correctReps >= self.squatTargetCorrectReps {
-                            self.speech.speak("Completed", language: self.speechLang, minInterval: 0)
-                            self.finishSession()
+                            self.speech.speak("Squat completed", language: self.speechLang, minInterval: 0)
+                            self.switchToPlank()
                         }
                     }
+                    return
+                }
+
+                // PLANK
+                if self.mode == .plank {
+                    self.handlePlankResult(pred: predRaw, conf: conf)
                 }
             }
             return
@@ -487,6 +568,72 @@ final class WorkoutSessionViewModel: ObservableObject {
             wallSitConsecutiveCorrect = 0
             correctSeconds = 0
             setFeedbackIfChanged("Reset • Hold correct again")
+        }
+    }
+
+    // MARK: - Plank logic (เหมือน wall-sit: 3x correct gate -> 5s hold)
+    func handlePlankTick() {
+        guard isSessionRunning else { return }
+        guard mode == .plank else { return }
+        guard plankCountingActive else { return }
+        guard !passedPlank else { return }
+        guard plankIsCorrectHold else { return }
+
+        plankCorrectSeconds = min(plankTargetSeconds, plankCorrectSeconds + 0.1)
+
+        if plankCorrectSeconds >= plankTargetSeconds {
+            plankCorrectSeconds = plankTargetSeconds
+            passedPlank = true
+            setFeedbackIfChanged("Plank completed ✅")
+            finishSession()
+        }
+    }
+
+    private func handlePlankResult(pred: String, conf: Double?) {
+        let p = pred.lowercased()
+        let c = conf ?? 0.0
+
+        let isCorrectNow = p.contains("correct") && c >= wallSitConfThreshold
+
+        plankIsCorrectHold = isCorrectNow
+
+        if !isCorrectNow {
+            plankErrorCounts[pred] = (plankErrorCounts[pred] ?? 0) + 1
+        }
+
+        if passedPlank { return }
+
+        if !plankCountingActive {
+            if isCorrectNow {
+                plankConsecutiveCorrect = min(3, plankConsecutiveCorrect + 1)
+
+                if plankConsecutiveCorrect == 1 {
+                    speech.speak("OK", language: speechLang, minInterval: 0)
+                }
+
+                if plankConsecutiveCorrect >= 3 {
+                    plankCountingActive = true
+                    plankCorrectSeconds = 0
+                    plankTargetSeconds = 5.0
+                    setFeedbackIfChanged("Start plank hold…")
+                } else {
+                    setFeedbackIfChanged("Plank correct \(plankConsecutiveCorrect)/3 • Keep holding")
+                }
+            } else {
+                if plankConsecutiveCorrect != 0 {
+                    plankConsecutiveCorrect = 0
+                    setFeedbackIfChanged("Reset • Try plank again")
+                }
+            }
+            return
+        }
+
+        if !isCorrectNow {
+            plankCountingActive = false
+            plankIsCorrectHold = false
+            plankConsecutiveCorrect = 0
+            plankCorrectSeconds = 0
+            setFeedbackIfChanged("Reset • Hold plank correct again")
         }
     }
 

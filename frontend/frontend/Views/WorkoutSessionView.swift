@@ -12,6 +12,9 @@ struct WorkoutSessionView: View {
     // ✅ Squat idle timer (ยืนเฉยหลัง Stand OK)
     private let squatIdleTick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
+    // ✅ Plank hold timer
+    private let plankTick = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+
     init(setTitle: String) {
         self.setTitle = setTitle
         _viewModel = StateObject(wrappedValue: WorkoutSessionViewModel(setTitle: setTitle))
@@ -79,6 +82,9 @@ struct WorkoutSessionView: View {
         }
         .onReceive(squatIdleTick) { _ in
             viewModel.handleSquatIdleTick()
+        }
+        .onReceive(plankTick) { _ in
+            viewModel.handlePlankTick()
         }
     }
 
@@ -205,8 +211,10 @@ struct WorkoutSessionView: View {
         Group {
             if viewModel.mode == .wallSit {
                 wallSitProgressCard
-            } else {
+            } else if viewModel.mode == .squat {
                 squatProgressCard
+            } else {
+                plankProgressCard
             }
         }
     }
@@ -261,6 +269,28 @@ struct WorkoutSessionView: View {
             }
 
             progressBar(viewModel.squatProgress01, height: 10)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.24))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var plankProgressCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Plank Goal")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                Spacer()
+                Text("\(String(format: \"%.1f\", viewModel.plankCorrectSeconds)) / \(String(format: \"%.1f\", viewModel.plankTargetSeconds)) s")
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(.white.opacity(0.9))
+                    .monospacedDigit()
+            }
+
+            progressBar(viewModel.plankProgress01, height: 10)
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
