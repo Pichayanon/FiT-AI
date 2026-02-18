@@ -54,7 +54,8 @@ from fastapi.middleware.cors import CORSMiddleware
 # -----------------------------
 # Config
 # -----------------------------
-MODEL_PATH = "plank/models/plank_model.pkl"
+PLANK_DIR = os.path.dirname(__file__)
+MODEL_PATH = os.path.join(PLANK_DIR, "models", "plank_model.pkl")
 
 LABELS: Dict[int, str] = {
     0: "correct",
@@ -114,7 +115,8 @@ app.add_middleware(
 @dataclass
 class StreamState:
     started: bool = False
-    feats: List[Tuple[float, float]] = field(default_factory=list)
+    # per-frame features: (body_angle, torso_slope, hip_deviation, hip_height)
+    feats: List[Tuple[float, float, float, float]] = field(default_factory=list)
 
     # gate
     ready: bool = False
@@ -313,7 +315,7 @@ class FeatureExtractor:
     """Extract per-frame features used by the plank model.
 
     Returns per-frame tuple:
-        (body_angle, hip_height)
+        (body_angle, torso_slope, hip_deviation, hip_height)
     """
 
     def __init__(self, mp_pose: Any) -> None:
@@ -326,7 +328,7 @@ class FeatureExtractor:
         cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
         return np.degrees(np.arccos(np.clip(cos, -1, 1)))
 
-    def extract_features(self, res: Any, side: str) -> Optional[Tuple[float, float]]:
+    def extract_features(self, res: Any, side: str) -> Optional[Tuple[float, float, float, float]]:
         if not res.pose_landmarks:
             return None
 
@@ -341,42 +343,75 @@ class FeatureExtractor:
             ankle = self.mp_pose.PoseLandmark.LEFT_ANKLE
             shoulder = self.mp_pose.PoseLandmark.LEFT_SHOULDER
 
-        # Body straightness: angle at hip between shoulder-hip-ankle
-        body_angle = self.angle(
-            [lm[shoulder].x, lm[shoulder].y],
-            [lm[hip].x, lm[hip].y],
-            [lm[ankle].x, lm[ankle].y],
-        )
+        shoulder_xy = np.array([lm[shoulder].x, lm[shoulder].y], dtype=np.float32)
+        hip_xy = np.array([lm[hip].x, lm[hip].y], dtype=np.float32)
+        ankle_xy = np.array([lm[ankle].x, lm[ankle].y], dtype=np.float32)
 
-        # Hip height relative to shoulders/ankles (y is normalized image coord)
-        mean_ref_y = 0.5 * (lm[shoulder].y + lm[ankle].y)
-        hip_height = lm[hip].y - mean_ref_y
+        # 1️⃣ Body angle
+        body_angle = self.angle(shoulder_xy, hip_xy, ankle_xy)
 
-        return float(body_angle), float(hip_height)
+        # 2️⃣ Torso slope (y over x)
+        slope = (ankle_xy[1] - shoulder_xy[1]) / (ankle_xy[0] - shoulder_xy[0] + 1e-6)
+
+        # 3️⃣ Hip deviation from shoulder-ankle line
+        dev = np.abs(
+            np.cross(
+                ankle_xy - shoulder_xy,
+                shoulder_xy - hip_xy,
+            )
+        ) / (np.linalg.norm(ankle_xy - shoulder_xy) + 1e-6)
+
+        # 4️⃣ Relative hip height
+        mean_ref_y = 0.5 * (shoulder_xy[1] + ankle_xy[1])
+        hip_height = hip_xy[1] - mean_ref_y
+
+        return float(body_angle), float(slope), float(dev), float(hip_height)
 
     @staticmethod
-    def aggregate_window(vals: List[Tuple[float, float]]) -> np.ndarray:
+    def aggregate_window(vals: List[Tuple[float, float, float, float]]) -> np.ndarray:
         """
         Aggregate window into final feature vector:
         [
             mean_body_angle,
             std_body_angle,
             min_body_angle,
+            max_body_angle,
+
+            mean_torso_slope,
+            std_torso_slope,
+
+            mean_hip_deviation,
+            max_hip_deviation,
+
             mean_hip_height,
             std_hip_height,
+            min_hip_height,
+            max_hip_height,
         ]
-        This matches the 5-dim feature definition in train_plank.py.
+        This matches the 12-dim feature definition in train_plank.py.
         """
         body = [v[0] for v in vals]
-        hip = [v[1] for v in vals]
+        slope = [v[1] for v in vals]
+        dev = [v[2] for v in vals]
+        hip = [v[3] for v in vals]
 
         return np.array(
             [
                 np.mean(body),
                 np.std(body),
                 np.min(body),
+                np.max(body),
+
+                np.mean(slope),
+                np.std(slope),
+
+                np.mean(dev),
+                np.max(dev),
+
                 np.mean(hip),
                 np.std(hip),
+                np.min(hip),
+                np.max(hip),
             ],
             dtype=np.float32,
         )

@@ -47,11 +47,12 @@ mp_pose = mp.solutions.pose
 
 
 def extract_features(video_path: str):
-    """Extract simple plank features from a side-view video."""
     cap = cv2.VideoCapture(video_path)
     pose = mp_pose.Pose()
 
     body_angles = []
+    hip_deviations = []
+    torso_slopes = []
     hip_heights = []
 
     while cap.isOpened():
@@ -66,7 +67,6 @@ def extract_features(video_path: str):
 
         lm = res.pose_landmarks.landmark
 
-        # Decide visible side (same heuristic as wall-sit)
         right_vis = lm[mp_pose.PoseLandmark.RIGHT_HIP].visibility
         left_vis = lm[mp_pose.PoseLandmark.LEFT_HIP].visibility
         is_right = right_vis > left_vis
@@ -80,15 +80,29 @@ def extract_features(video_path: str):
             hip = lm[mp_pose.PoseLandmark.LEFT_HIP]
             ankle = lm[mp_pose.PoseLandmark.LEFT_ANKLE]
 
-        # Body straightness: angle at hip between shoulder-hip-ankle
-        body_angle = angle(
-            [shoulder.x, shoulder.y],
-            [hip.x, hip.y],
-            [ankle.x, ankle.y],
-        )
+        shoulder_xy = [shoulder.x, shoulder.y]
+        hip_xy = [hip.x, hip.y]
+        ankle_xy = [ankle.x, ankle.y]
+
+        # 1️⃣ Body angle
+        body_angle = angle(shoulder_xy, hip_xy, ankle_xy)
         body_angles.append(body_angle)
 
-        # Hip height relative to shoulders/ankles (y is normalized image coord)
+        # 2️⃣ Torso slope
+        slope = (ankle.y - shoulder.y) / (ankle.x - shoulder.x + 1e-6)
+        torso_slopes.append(slope)
+
+        # 3️⃣ Hip deviation from shoulder-ankle line
+        dev = np.abs(
+            np.cross(
+                np.array(ankle_xy) - np.array(shoulder_xy),
+                np.array(shoulder_xy) - np.array(hip_xy),
+            )
+        ) / (np.linalg.norm(np.array(ankle_xy) - np.array(shoulder_xy)) + 1e-6)
+
+        hip_deviations.append(dev)
+
+        # 4️⃣ Relative hip height
         mean_ref_y = 0.5 * (shoulder.y + ankle.y)
         hip_height = hip.y - mean_ref_y
         hip_heights.append(hip_height)
@@ -102,11 +116,22 @@ def extract_features(video_path: str):
         np.mean(body_angles),
         np.std(body_angles),
         np.min(body_angles),
+        np.max(body_angles),
+
+        np.mean(torso_slopes),
+        np.std(torso_slopes),
+
+        np.mean(hip_deviations),
+        np.max(hip_deviations),
+
         np.mean(hip_heights),
         np.std(hip_heights),
+        np.min(hip_heights),
+        np.max(hip_heights),
     ]
 
     return feat
+
 
 
 # -----------------------------
