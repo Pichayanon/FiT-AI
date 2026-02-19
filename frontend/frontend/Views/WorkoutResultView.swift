@@ -180,7 +180,7 @@ fileprivate struct SummaryExerciseCard: View {
 
     private var iconName: String {
         switch item.displayName.lowercased() {
-        case "wall-sit": return "figure.stand"
+        case "wall-sit": return "figure.strengthtraining.traditional"
         case "squat": return "figure.strengthtraining.traditional"
         default: return "figure.strengthtraining.traditional"
         }

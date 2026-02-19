@@ -260,7 +260,7 @@ struct WorkoutSessionView: View {
                         .foregroundColor(.white.opacity(0.9))
                         .monospacedDigit()
                 } else {
-                    Text("\(viewModel.wallSitConsecutiveCorrect) / 3 correct")
+                    Text("\(viewModel.wallSitConsecutiveCorrect)")
                         .font(.caption2.weight(.bold))
                         .foregroundColor(.white.opacity(0.9))
                         .monospacedDigit()
@@ -277,13 +277,13 @@ struct WorkoutSessionView: View {
     }
 
     private var wallSitTitleText: String {
-        if viewModel.passedWallSit { return viewModel.showSquatPreview ? "PASSED ✅ (Next: Squat)" : "PASSED ✅ (Switching…)" }
+        if viewModel.passedWallSit { return viewModel.showSquatPreview ? "PASSED  (Next: Squat)" : "PASSED (Switching…)" }
         if viewModel.wallSitCountingActive { return "Hold Correct (5s)" }
-        return "Get 3x Correct to start"
+        return "Get In Position"
     }
 
     private var plankTitleText: String {
-        if viewModel.passedPlank { return "PASSED ✅" }
+        if viewModel.passedPlank { return "PASSED" }
         return "Plank Goal"
     }
 
@@ -484,7 +484,7 @@ private struct PlankGuideOverlayCompact: View {
                 .frame(maxWidth: 260, maxHeight: 200)
                 .shadow(radius: 10)
 
-            Text("Hold straight • Side view")
+            Text("Hold straight")
                 .font(.caption.weight(.semibold))
                 .foregroundColor(.white)
                 .padding(.horizontal, 12)
