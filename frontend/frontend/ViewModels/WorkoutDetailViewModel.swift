@@ -9,9 +9,9 @@ final class WorkoutDetailViewModel: ObservableObject {
     init(setTitle: String) {
         self.setTitle = setTitle
         self.exercises = [
-            WorkoutExercise(name: "Squat", imageName: "squat", reps: "15 reps"),
-            WorkoutExercise(name: "High Knees", imageName: "highknees", reps: "10 reps"),
-            WorkoutExercise(name: "Mountain Climbers", imageName: "mountain", reps: "20 reps")
+            WorkoutExercise(name: "Wall-Sit", imageName: "wallsit", reps: "5s hold"),
+            WorkoutExercise(name: "Squat", imageName: "squat", reps: "3 correct reps"),
+            WorkoutExercise(name: "Plank", imageName: "plank", reps: "5s hold")
         ]
     }
 }
