@@ -221,6 +221,7 @@ final class WorkoutSessionViewModel: ObservableObject {
 
     func finishSession() {
         stopSession()
+        speech.speak("Session complete", language: speechLang, minInterval: 0)
         sessionSummary = buildSessionSummary()
         Task { await workoutHistory.saveSession(summary: sessionSummary, setTitle: setTitle) }
         navigateToResult = true
@@ -300,6 +301,7 @@ final class WorkoutSessionViewModel: ObservableObject {
             correctSeconds = targetSeconds
             passedWallSit = true
             setFeedbackIfChanged("Passed ✅")
+            speech.speak("Wall-sit complete. Switch to Squat.", language: speechLang, minInterval: 0)
 
             // ✅ หยุด stream ระหว่าง preview กันมัน detect ต่อ
             cameraManager.stopStreaming()
@@ -384,7 +386,7 @@ final class WorkoutSessionViewModel: ObservableObject {
         didSwitchToSquat = true
         mode = .squat
         backendState = BackendPhase.NO_POSE.rawValue
-        setFeedbackIfChanged("Switching to Squat…")
+        setFeedbackIfChanged("PASSED (Switch to Squat)")
 
         // reset squat counters (เริ่มนับใหม่)
         totalReps = 0
@@ -406,7 +408,6 @@ final class WorkoutSessionViewModel: ObservableObject {
         cameraManager.stopStreaming()
         cameraManager.startStreaming(to: activeWSURL)
 
-        speech.speak("Switch to squat", language: speechLang, minInterval: 0)
     }
 
     private func switchToPlank() {
@@ -416,7 +417,7 @@ final class WorkoutSessionViewModel: ObservableObject {
         didSwitchToPlank = true
         mode = .plank
         backendState = BackendPhase.NO_POSE.rawValue
-        setFeedbackIfChanged("Switching to Plank…")
+        setFeedbackIfChanged("PASSED (Switch to Plank)")
 
         // reset plank counters
         plankCorrectSeconds = 0
@@ -430,7 +431,6 @@ final class WorkoutSessionViewModel: ObservableObject {
         cameraManager.stopStreaming()
         cameraManager.startStreaming(to: activeWSURL)
 
-        speech.speak("Switch to plank", language: speechLang, minInterval: 0)
     }
 
     // MARK: - Backend Message
@@ -503,7 +503,7 @@ final class WorkoutSessionViewModel: ObservableObject {
                         if !self.squatStandOK {
                             self.squatStandOK = true
                             self.lastStandOKAt = Date()
-                            self.speech.speak("OK", language: self.speechLang, minInterval: 0)
+                            self.speech.speak("Stand OK", language: self.speechLang, minInterval: 0)
                         }
                         return
                     }
@@ -536,7 +536,7 @@ final class WorkoutSessionViewModel: ObservableObject {
                         }
 
                         if self.correctReps >= self.squatTargetCorrectReps {
-                            self.speech.speak("Squat completed", language: self.speechLang, minInterval: 0)
+                            self.speech.speak("Squat complete. Switch to Plank.", language: self.speechLang, minInterval: 0)
                             self.cameraManager.stopStreaming()
                             self.startPlankPreviewThenSwitch()
                         }
@@ -600,7 +600,7 @@ final class WorkoutSessionViewModel: ObservableObject {
                 // หลุด correct ก่อนครบ 3 => reset streak
                 if wallSitConsecutiveCorrect != 0 {
                     wallSitConsecutiveCorrect = 0
-                    setFeedbackIfChanged("Reset • Try again")
+                    setFeedbackIfChanged(incorrectFeedbackText(for: pred))
                 }
             }
             return
@@ -613,7 +613,7 @@ final class WorkoutSessionViewModel: ObservableObject {
             wallSitIsCorrectHold = false
             wallSitConsecutiveCorrect = 0
             correctSeconds = 0
-            setFeedbackIfChanged("Reset • Hold correct again")
+            setFeedbackIfChanged(incorrectFeedbackText(for: pred))
         }
     }
 
@@ -674,7 +674,7 @@ final class WorkoutSessionViewModel: ObservableObject {
             } else {
                 if plankConsecutiveCorrect != 0 {
                     plankConsecutiveCorrect = 0
-                    setFeedbackIfChanged("Reset • Try plank again")
+                    setFeedbackIfChanged(incorrectFeedbackText(for: pred))
                 }
             }
             return
@@ -685,11 +685,19 @@ final class WorkoutSessionViewModel: ObservableObject {
             plankIsCorrectHold = false
             plankConsecutiveCorrect = 0
             plankCorrectSeconds = 0
-            setFeedbackIfChanged("Reset • Hold plank correct again")
+            setFeedbackIfChanged(incorrectFeedbackText(for: pred))
         }
     }
 
     // MARK: - Helpers
+    private func incorrectFeedbackText(for pred: String) -> String {
+        let trimmed = pred.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "..." else {
+            return "Adjust your position"
+        }
+        return Self.displayLabel(for: trimmed)
+    }
+
     private func setFeedbackIfChanged(_ newText: String) {
         if feedback != newText {
             feedback = newText

@@ -182,7 +182,7 @@ fileprivate struct SummaryExerciseCard: View {
         switch item.displayName.lowercased() {
         case "wall-sit": return "figure.strengthtraining.traditional"
         case "squat": return "figure.strengthtraining.traditional"
-        default: return "figure.strengthtraining.traditional"
+        default: return "fxklellellliizzzzzdddigure.strengthtraining.traditional"
         }
     }
 

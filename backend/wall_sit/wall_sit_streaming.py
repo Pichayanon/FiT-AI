@@ -628,7 +628,7 @@ class WallSitWebSocketSession:
             ):
                 await self.status.send_info(
                     self.ws,
-                    "Show your body",
+                    "Adjust your camera to see your full body",
                     {"brightness_mean": round(brightness_mean, 1), "brightness_th": DARK_BRIGHTNESS_TH},
                 )
                 self.st.no_pose_alerted = True
@@ -692,7 +692,7 @@ class WallSitWebSocketSession:
             print(f"[GATE] READY session_id={self.st.session_id} side={chosen_side}")
             await self.status.send_info(
                 self.ws,
-                "Side landmarks ready",
+                "Side View OK",
                 {"session_id": self.st.session_id, "side": chosen_side},
             )
             await self.status.send_status(

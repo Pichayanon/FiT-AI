@@ -63,9 +63,12 @@ final class SpeechManager: ObservableObject {
     func shouldSpeak(_ rawText: String) -> Bool {
         let t = rawText.lowercased()
         if t.isEmpty { return false }
+        if t.contains("websocket connected") { return false }
+        if t.contains("streaming") { return false }
+        if t.contains("recording") { return false }
         if t.contains("correct") { return false } // ไม่พูดถ้า correct
         if t.contains("hold") { return false }    // กันพูด "hold..." รัว
-        // "passed" ให้พูดได้
+        if t.contains("passed") { return false }  // ตัดเสียง pass อัตโนมัติ (ใช้ custom speech แทน)
         return true
     }
 

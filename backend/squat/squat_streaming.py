@@ -1096,7 +1096,7 @@ class SquatWebSocketSession:
             self.st.prev_knee_raw = None
             self.st.last_sent_bottom_event_i = -10**9
             self.st.last_sent_stand_label = ""
-            await self.status.send_info(self.ws, "Front view ready", {"session_id": self.st.session_id, "gate": gate_dbg if self.debug else None})
+            await self.status.send_info(self.ws, "Front View OK", {"session_id": self.st.session_id, "gate": gate_dbg if self.debug else None})
             await self.status.send_status(self.ws, self.st, "ready", {"ready_streak": self.st.ready_streak}, force=True)
         elif not self.st.ready:
             await self.status.send_status(

@@ -276,8 +276,15 @@ struct WorkoutSessionView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
+    private var squatTitleText: String {
+        if viewModel.correctReps >= viewModel.squatTargetCorrectReps {
+            return "PASSED (Switch to Plank)"
+        }
+        return "Squat Goal"
+    }
+
     private var wallSitTitleText: String {
-        if viewModel.passedWallSit { return viewModel.showSquatPreview ? "PASSED  (Next: Squat)" : "PASSED (Switching…)" }
+        if viewModel.passedWallSit { return "PASSED (Switch to Squat)" }
         if viewModel.wallSitCountingActive { return "Hold Correct (5s)" }
         return "Get In Position"
     }
@@ -290,7 +297,7 @@ struct WorkoutSessionView: View {
     private var squatProgressCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Squat Goal")
+                Text(squatTitleText)
                     .font(.caption.weight(.semibold))
                     .foregroundColor(.white)
                 Spacer()
@@ -455,7 +462,7 @@ private struct SquatGuideOverlayCompact: View {
         TimelineView(.periodic(from: Date(), by: 1.1)) { context in
             let idx = Int(context.date.timeIntervalSince1970 / 1.1) % frames.count
             VStack(spacing: 10) {
-                Image(frames[idx])
+                Image(frames[idx]) ตต
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: 260, maxHeight: 200)
