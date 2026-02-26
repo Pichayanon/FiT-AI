@@ -13,6 +13,10 @@ struct WorkoutDetailView: View {
                 .font(.largeTitle)
                 .fontWeight(.bold)
                 .foregroundColor(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .allowsTightening(true)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top)
 
             Text("This set includes:")

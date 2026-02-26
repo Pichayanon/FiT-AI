@@ -81,11 +81,22 @@ final class WorkoutSessionViewModel: ObservableObject {
 
     /// นับจำนวนครั้งที่ผิดแต่ละประเภทใน wall-sit (label จาก backend → count)
     private var wallSitErrorCounts: [String: Int] = [:]
+    /// ไทม์ไลน์ว่าผิดตอนไหน + ผิดอะไร
+    private var wallSitMistakeEvents: [MistakeEvent] = []
     /// ใช้ dedupe: นับ error แค่ตอนเปลี่ยนจาก correct → error (ไม่นับทุก message)
     private var lastWallSitPredWasCorrect: Bool = true
 
+    /// นับจำนวนครั้งที่ผิดแต่ละประเภทใน squat (label จาก backend → count)
+    private var squatErrorCounts: [String: Int] = [:]
+    /// ไทม์ไลน์ว่าผิดตอนไหน + ผิดอะไร
+    private var squatMistakeEvents: [MistakeEvent] = []
+    /// ใช้ dedupe: นับ error แค่ตอนเปลี่ยนจาก correct → error
+    private var lastSquatPredWasCorrect: Bool = true
+
     /// นับจำนวนครั้งที่ผิดแต่ละประเภทใน plank (label จาก backend → count)
     private var plankErrorCounts: [String: Int] = [:]
+    /// ไทม์ไลน์ว่าผิดตอนไหน + ผิดอะไร
+    private var plankMistakeEvents: [MistakeEvent] = []
     /// ใช้ dedupe: นับ error แค่ตอนเปลี่ยนจาก correct → error (ไม่นับทุก message)
     private var lastPlankPredWasCorrect: Bool = true
 
@@ -204,8 +215,13 @@ final class WorkoutSessionViewModel: ObservableObject {
         lastPleaseStartAt = .distantPast
 
         wallSitErrorCounts = [:]
+        wallSitMistakeEvents = []
+        squatErrorCounts = [:]
+        squatMistakeEvents = []
         plankErrorCounts = [:]
+        plankMistakeEvents = []
         lastWallSitPredWasCorrect = true
+        lastSquatPredWasCorrect = true
         lastPlankPredWasCorrect = true
 
         cameraManager.startStreaming(to: activeWSURL)
@@ -255,20 +271,23 @@ final class WorkoutSessionViewModel: ObservableObject {
             name: "Wall-Sit",
             durationSeconds: correctSeconds,
             targetSeconds: targetSeconds,
-            errors: wallSitErrors
+            errors: wallSitErrors,
+            mistakes: wallSitMistakeEvents
         ))
 
         // Squat (movement)
-        let squatErrors: [ErrorCount] = incorrectReps > 0
-            ? [ErrorCount(reason: "Knees in", count: incorrectReps)]
-            : []
+        let squatErrors: [ErrorCount] = squatErrorCounts
+            .filter { $0.value > 0 }
+            .map { ErrorCount(reason: Self.displayLabel(for: $0.key), count: $0.value) }
+            .sorted { $0.count > $1.count }
         items.append(.movement(
             name: "Squat",
             totalReps: totalReps,
             correctReps: correctReps,
             incorrectReps: incorrectReps,
             targetCorrectReps: squatTargetCorrectReps,
-            errors: squatErrors
+            errors: squatErrors,
+            mistakes: squatMistakeEvents
         ))
 
         // Plank (isometric)
@@ -280,7 +299,8 @@ final class WorkoutSessionViewModel: ObservableObject {
             name: "Plank",
             durationSeconds: plankCorrectSeconds,
             targetSeconds: plankTargetSeconds,
-            errors: plankErrors
+            errors: plankErrors,
+            mistakes: plankMistakeEvents
         ))
 
         return SessionSummary(items: items, totalTimeSeconds: totalTime, estimatedCalories: calories)
@@ -500,6 +520,7 @@ final class WorkoutSessionViewModel: ObservableObject {
                 if self.mode == .squat {
                     // 1️⃣ STAND OK
                     if predRaw == "stand_ok" {
+                        self.lastSquatPredWasCorrect = true
                         if !self.squatStandOK {
                             self.squatStandOK = true
                             self.lastStandOKAt = Date()
@@ -513,12 +534,37 @@ final class WorkoutSessionViewModel: ObservableObject {
                         self.squatStarted = true
                     }
 
-                    // 3️⃣ REP UPDATE (backend ส่ง total, dataset_correct/good, incorrect)
-                    if let reps = obj["reps"] as? [String: Any] {
-                        if let total = reps["total"] as? Int {
-                            self.totalReps = total
-                        }
+                    let reps = obj["reps"] as? [String: Any]
+                    let totalFromPayload = reps?["total"] as? Int
+                    if let totalFromPayload {
+                        self.totalReps = totalFromPayload
+                    }
 
+                    let currentRepNumber: Int? = {
+                        let rep = totalFromPayload ?? self.totalReps
+                        return rep > 0 ? rep : nil
+                    }()
+
+                    let squatIncorrectLabels: Set<String> = ["knees_in", "bad", "incorrect"]
+                    let isSquatIncorrectNow = squatIncorrectLabels.contains(predRaw)
+                    if isSquatIncorrectNow {
+                        if self.lastSquatPredWasCorrect {
+                            self.squatErrorCounts[predRaw] = (self.squatErrorCounts[predRaw] ?? 0) + 1
+                            self.squatMistakeEvents.append(
+                                MistakeEvent(
+                                    atSecond: self.sessionElapsedSecond(),
+                                    reason: Self.displayLabel(for: predRaw),
+                                    repNumber: currentRepNumber
+                                )
+                            )
+                        }
+                        self.lastSquatPredWasCorrect = false
+                    } else if predRaw.contains("correct") || predRaw == "good" || predRaw == "stand" {
+                        self.lastSquatPredWasCorrect = true
+                    }
+
+                    // 3️⃣ REP UPDATE (backend ส่ง total, dataset_correct/good, incorrect)
+                    if let reps {
                         let correct: Int? = (reps["correct"] as? Int)
                             ?? (reps["dataset_correct"] as? Int)
                             ?? (reps["good"] as? Int)
@@ -571,6 +617,9 @@ final class WorkoutSessionViewModel: ObservableObject {
         } else {
             if lastWallSitPredWasCorrect {
                 wallSitErrorCounts[pred] = (wallSitErrorCounts[pred] ?? 0) + 1
+                wallSitMistakeEvents.append(
+                    MistakeEvent(atSecond: sessionElapsedSecond(), reason: Self.displayLabel(for: pred), repNumber: nil)
+                )
             }
             lastWallSitPredWasCorrect = false
         }
@@ -649,6 +698,9 @@ final class WorkoutSessionViewModel: ObservableObject {
         } else {
             if lastPlankPredWasCorrect {
                 plankErrorCounts[pred] = (plankErrorCounts[pred] ?? 0) + 1
+                plankMistakeEvents.append(
+                    MistakeEvent(atSecond: sessionElapsedSecond(), reason: Self.displayLabel(for: pred), repNumber: nil)
+                )
             }
             lastPlankPredWasCorrect = false
         }
@@ -690,6 +742,10 @@ final class WorkoutSessionViewModel: ObservableObject {
     }
 
     // MARK: - Helpers
+    private func sessionElapsedSecond() -> Int {
+        max(0, Int(Date().timeIntervalSince(startTime)))
+    }
+
     private func incorrectFeedbackText(for pred: String) -> String {
         let trimmed = pred.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != "..." else {

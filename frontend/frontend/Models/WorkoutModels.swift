@@ -33,22 +33,44 @@ struct ErrorCount: Identifiable {
     let count: Int
 }
 
+/// เหตุการณ์ที่ผิดในแต่ละท่า (บอกเวลาที่ผิด + ผิดอะไร)
+struct MistakeEvent: Identifiable {
+    let id = UUID()
+    let atSecond: Int
+    let reason: String
+    let repNumber: Int?
+}
+
 /// รายการสรุปของท่าออกกำลังกายหนึ่งท่า
 enum ExerciseSummaryItem: Identifiable {
-    case movement(name: String, totalReps: Int, correctReps: Int, incorrectReps: Int, targetCorrectReps: Int, errors: [ErrorCount])
-    case isometric(name: String, durationSeconds: Double, targetSeconds: Double, errors: [ErrorCount])
+    case movement(
+        name: String,
+        totalReps: Int,
+        correctReps: Int,
+        incorrectReps: Int,
+        targetCorrectReps: Int,
+        errors: [ErrorCount],
+        mistakes: [MistakeEvent]
+    )
+    case isometric(
+        name: String,
+        durationSeconds: Double,
+        targetSeconds: Double,
+        errors: [ErrorCount],
+        mistakes: [MistakeEvent]
+    )
 
     var id: String {
         switch self {
-        case .movement(let name, _, _, _, _, _): return "movement-\(name)"
-        case .isometric(let name, _, _, _): return "isometric-\(name)"
+        case .movement(let name, _, _, _, _, _, _): return "movement-\(name)"
+        case .isometric(let name, _, _, _, _): return "isometric-\(name)"
         }
     }
 
     var displayName: String {
         switch self {
-        case .movement(let name, _, _, _, _, _): return name
-        case .isometric(let name, _, _, _): return name
+        case .movement(let name, _, _, _, _, _, _): return name
+        case .isometric(let name, _, _, _, _): return name
         }
     }
 }
@@ -66,6 +88,12 @@ struct ErrorCountRecord: Codable {
     let count: Int
 }
 
+struct MistakeEventRecord: Codable {
+    let atSecond: Int
+    let reason: String
+    let repNumber: Int?
+}
+
 struct ExerciseRecord: Codable {
     let name: String
     let type: String // "movement" | "isometric"
@@ -76,6 +104,7 @@ struct ExerciseRecord: Codable {
     let durationSeconds: Double?
     let targetSeconds: Double?
     let errors: [ErrorCountRecord]
+    let mistakes: [MistakeEventRecord]
 }
 
 struct WorkoutSessionRecord: Codable {
@@ -104,6 +133,15 @@ extension ExerciseRecord {
         guard let name = data["name"] as? String, let type = data["type"] as? String else { return nil }
         let errors: [ErrorCountRecord] = (data["errors"] as? [[String: Any]])?
             .compactMap { e in (e["reason"] as? String).flatMap { r in (e["count"] as? Int).map { ErrorCountRecord(reason: r, count: $0) } } } ?? []
+        let mistakes: [MistakeEventRecord] = (data["mistakes"] as? [[String: Any]])?
+            .compactMap { m in
+                (m["reason"] as? String).flatMap { reason in
+                    (m["atSecond"] as? Int).map { at in
+                        let repNumber = (m["repNumber"] as? Int) ?? (m["repNumber"] as? Double).map { Int($0) }
+                        return MistakeEventRecord(atSecond: at, reason: reason, repNumber: repNumber)
+                    }
+                }
+            } ?? []
         self.name = name
         self.type = type
         self.totalReps = data["totalReps"] as? Int
@@ -113,6 +151,7 @@ extension ExerciseRecord {
         self.durationSeconds = data["durationSeconds"] as? Double
         self.targetSeconds = data["targetSeconds"] as? Double
         self.errors = errors
+        self.mistakes = mistakes
     }
 }
 
@@ -149,7 +188,7 @@ extension SessionSummary {
     func toRecord(userId: String, setTitle: String) -> WorkoutSessionRecord {
         let exercises: [ExerciseRecord] = items.map { item in
             switch item {
-            case .movement(let name, let totalReps, let correctReps, let incorrectReps, let targetCorrectReps, let errors):
+            case .movement(let name, let totalReps, let correctReps, let incorrectReps, let targetCorrectReps, let errors, let mistakes):
                 return ExerciseRecord(
                     name: name,
                     type: "movement",
@@ -159,9 +198,10 @@ extension SessionSummary {
                     targetCorrectReps: targetCorrectReps,
                     durationSeconds: nil,
                     targetSeconds: nil,
-                    errors: errors.map { ErrorCountRecord(reason: $0.reason, count: $0.count) }
+                    errors: errors.map { ErrorCountRecord(reason: $0.reason, count: $0.count) },
+                    mistakes: mistakes.map { MistakeEventRecord(atSecond: $0.atSecond, reason: $0.reason, repNumber: $0.repNumber) }
                 )
-            case .isometric(let name, let durationSeconds, let targetSeconds, let errors):
+            case .isometric(let name, let durationSeconds, let targetSeconds, let errors, let mistakes):
                 return ExerciseRecord(
                     name: name,
                     type: "isometric",
@@ -171,7 +211,8 @@ extension SessionSummary {
                     targetCorrectReps: nil,
                     durationSeconds: durationSeconds,
                     targetSeconds: targetSeconds,
-                    errors: errors.map { ErrorCountRecord(reason: $0.reason, count: $0.count) }
+                    errors: errors.map { ErrorCountRecord(reason: $0.reason, count: $0.count) },
+                    mistakes: mistakes.map { MistakeEventRecord(atSecond: $0.atSecond, reason: $0.reason, repNumber: $0.repNumber) }
                 )
             }
         }

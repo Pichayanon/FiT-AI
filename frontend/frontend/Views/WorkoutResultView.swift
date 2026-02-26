@@ -3,9 +3,11 @@ import SwiftUI
 struct WorkoutResultView: View {
     @StateObject private var viewModel: WorkoutResultViewModel
     @Environment(\.dismiss) private var dismiss
+    private let onBackToHome: (() -> Void)?
 
-    init(summary: SessionSummary) {
+    init(summary: SessionSummary, onBackToHome: (() -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: WorkoutResultViewModel(summary: summary))
+        self.onBackToHome = onBackToHome
     }
 
     var body: some View {
@@ -48,7 +50,13 @@ struct WorkoutResultView: View {
             }
 
             // Sticky primary CTA
-            Button(action: { dismiss() }) {
+            Button(action: {
+                if let onBackToHome {
+                    onBackToHome()
+                } else {
+                    dismiss()
+                }
+            }) {
                 Text("Back to Home")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
@@ -111,7 +119,7 @@ fileprivate struct SummaryExerciseCard: View {
             }
 
             switch item {
-            case .movement(_, let totalReps, let correctReps, let incorrectReps, let targetCorrectReps, let errors):
+            case .movement(_, let totalReps, let correctReps, let incorrectReps, let targetCorrectReps, let errors, let mistakes):
                 VStack(alignment: .leading, spacing: 8) {
                     progressBar(progress: targetCorrectReps > 0 ? Double(correctReps) / Double(targetCorrectReps) : 0)
                     Text("\(correctReps) / \(targetCorrectReps) reps")
@@ -124,9 +132,10 @@ fileprivate struct SummaryExerciseCard: View {
                             .foregroundColor(.gray)
                     }
                     errorsBlock(errors)
+                    mistakesBlock(mistakes)
                 }
 
-            case .isometric(_, let durationSeconds, let targetSeconds, let errors):
+            case .isometric(_, let durationSeconds, let targetSeconds, let errors, let mistakes):
                 VStack(alignment: .leading, spacing: 8) {
                     progressBar(progress: targetSeconds > 0 ? durationSeconds / targetSeconds : 0)
                     Text("\(formatSeconds(durationSeconds)) / \(formatSeconds(targetSeconds))")
@@ -134,6 +143,7 @@ fileprivate struct SummaryExerciseCard: View {
                         .fontWeight(.medium)
                         .foregroundColor(.white)
                     errorsBlock(errors)
+                    mistakesBlock(mistakes)
                 }
             }
         }
@@ -178,16 +188,50 @@ fileprivate struct SummaryExerciseCard: View {
         }
     }
 
+    private func mistakesBlock(_ mistakes: [MistakeEvent]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Mistake timeline")
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundColor(.gray)
+            if mistakes.isEmpty {
+                Text("No mistake timestamps")
+                    .font(.subheadline)
+                    .foregroundColor(.gray.opacity(0.7))
+            } else {
+                ForEach(mistakes) { event in
+                    Text(mistakeTimelineText(event))
+                        .font(.subheadline)
+                        .foregroundColor(.orange.opacity(0.95))
+                }
+            }
+        }
+    }
+
     private var iconName: String {
         switch item.displayName.lowercased() {
         case "wall-sit": return "figure.strengthtraining.traditional"
         case "squat": return "figure.strengthtraining.traditional"
-        default: return "fxklellellliizzzzzdddigure.strengthtraining.traditional"
+        case "plank": return "figure.strengthtraining.traditional"
+        default: return "figure.strengthtraining.traditional"
         }
     }
 
     private func formatSeconds(_ s: Double) -> String {
         let n = Int(round(s))
         return "\(n) sec"
+    }
+
+    private func formatTimelineSecond(_ second: Int) -> String {
+        let m = max(0, second) / 60
+        let s = max(0, second) % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+
+    private func mistakeTimelineText(_ event: MistakeEvent) -> String {
+        if let rep = event.repNumber {
+            return "• Rep \(rep) — \(event.reason) (\(formatTimelineSecond(event.atSecond)))"
+        }
+        return "• \(formatTimelineSecond(event.atSecond)) — \(event.reason)"
     }
 }

@@ -297,14 +297,36 @@ private struct HistoryExerciseCard: View {
                 }
             }
 
-            if !exercise.errors.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("What went wrong")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.gray)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("What went wrong")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.gray)
+                if exercise.errors.isEmpty {
+                    Text("None")
+                        .font(.subheadline)
+                        .foregroundColor(.gray.opacity(0.7))
+                } else {
                     ForEach(Array(exercise.errors.enumerated()), id: \.offset) { _, e in
                         Text("• \(e.reason) — \(e.count) times")
+                            .font(.subheadline)
+                            .foregroundColor(.orange.opacity(0.95))
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Mistake timeline")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.gray)
+                if exercise.mistakes.isEmpty {
+                    Text("No mistake timestamps")
+                        .font(.subheadline)
+                        .foregroundColor(.gray.opacity(0.7))
+                } else {
+                    ForEach(Array(exercise.mistakes.enumerated()), id: \.offset) { _, event in
+                        Text(mistakeTimelineText(event))
                             .font(.subheadline)
                             .foregroundColor(.orange.opacity(0.95))
                     }
@@ -337,5 +359,18 @@ private struct HistoryExerciseCard: View {
         }
         .frame(height: 6)
         .frame(maxWidth: .infinity)
+    }
+
+    private func formatTimelineSecond(_ second: Int) -> String {
+        let m = max(0, second) / 60
+        let s = max(0, second) % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+
+    private func mistakeTimelineText(_ event: MistakeEventRecord) -> String {
+        if let rep = event.repNumber {
+            return "• Rep \(rep) — \(event.reason) (\(formatTimelineSecond(event.atSecond)))"
+        }
+        return "• \(formatTimelineSecond(event.atSecond)) — \(event.reason)"
     }
 }

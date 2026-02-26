@@ -3,6 +3,7 @@ import SwiftUI
 // MARK: - Workout Session (Wall-sit -> show Squat preview 5s -> auto switch to Squat)
 struct WorkoutSessionView: View {
     let setTitle: String
+    @Environment(\.dismiss) private var dismiss
 
     @StateObject private var viewModel: WorkoutSessionViewModel
 
@@ -67,7 +68,9 @@ struct WorkoutSessionView: View {
             }
             .navigationBarBackButtonHidden(true)
             .navigationDestination(isPresented: $viewModel.navigateToResult) {
-                WorkoutResultView(summary: viewModel.sessionSummary)
+                WorkoutResultView(summary: viewModel.sessionSummary) {
+                    dismiss()
+                }
                     .navigationBarBackButtonHidden(true)
             }
         }
@@ -462,7 +465,7 @@ private struct SquatGuideOverlayCompact: View {
         TimelineView(.periodic(from: Date(), by: 1.1)) { context in
             let idx = Int(context.date.timeIntervalSince1970 / 1.1) % frames.count
             VStack(spacing: 10) {
-                Image(frames[idx]) ตต
+                Image(frames[idx])
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: 260, maxHeight: 200)
