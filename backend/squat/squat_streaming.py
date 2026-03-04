@@ -899,7 +899,7 @@ class SquatWebSocketSession:
                     "min_hip_gap": FRONT_MIN_HIP_X_GAP,
                     "needed_streak": self.ready_streak_n,
                 },
-                "stand_once_only": True,
+                "stand_once_only": False,
                 "stand_ok_labels": list(STAND_OK_LABELS),
             },
         )
@@ -1150,9 +1150,10 @@ class SquatWebSocketSession:
         knee_r = angle_3pts(rhip, rknee, rank)
         knee_raw = float((knee_l + knee_r) * 0.5)
 
-        # Rule-based stand gate (robust): near-straight knees + stable
+        # Rule-based stand gate (robust): near-straight knees.
+        # Allow movement (delta) so we can predict while user is setting up (shifting legs).
         knee_delta = abs(knee_raw - self.st.prev_knee_raw) if self.st.prev_knee_raw is not None else 0.0
-        is_stand = (knee_raw >= STAND_KNEE_ANGLE_DEG_TH) and (knee_delta <= STAND_KNEE_DELTA_MAX_DEG)
+        is_stand = (knee_raw >= STAND_KNEE_ANGLE_DEG_TH) # and (knee_delta <= STAND_KNEE_DELTA_MAX_DEG)
         self.st.prev_knee_raw = knee_raw
         if is_stand:
             self.st.stand_streak += 1
@@ -1340,8 +1341,8 @@ class SquatWebSocketSession:
                     await self.ws.send_text(json.dumps(payload))
 
         if (
-            (not self.st.stand_ok)
-            and (self.st.total_reps == 0)
+            # (not self.st.stand_ok) -- User wants continuous feedback
+            (self.st.total_reps == 0)
             and self.model_svc.stand_loaded
             and self.model_svc.stand_T is not None
             and is_stand
@@ -1356,8 +1357,9 @@ class SquatWebSocketSession:
             self.st.last_stand_pred_label = pred_label
             self.st.last_stand_pred_conf = conf
             is_ok = pred_label in STAND_OK_LABELS
-            if is_ok:
-                self.st.stand_ok = True
+            # Update status continuously
+            self.st.stand_ok = bool(is_ok)
+            
             payload = {
                 "type": "result",
                 "mode": "stand",

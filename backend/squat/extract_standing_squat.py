@@ -284,8 +284,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Standing definition
     ap.add_argument("--stand_th", type=float, default=155.0, help="knee >= this is standing")
-    ap.add_argument("--stand_delta", type=float, default=5.0, help="knee change <= this")
-    ap.add_argument("--streak", type=int, default=3, help="need this many stable frames")
+    ap.add_argument("--stand_delta", type=float, default=5.0, help="knee change <= this (unused in simple threshold)")
+    ap.add_argument("--min_stand_frames", type=int, default=15, help="min frames to keep a segment")
+    ap.add_argument("--ema_alpha", type=float, default=0.3, help="smoothing factor for knee angle")
 
     # Segment trimming
     ap.add_argument("--pad_pre", type=int, default=0, help="include extra frames before stand start (if available)")
@@ -479,7 +480,7 @@ def process_one_video(video_path: str, args: argparse.Namespace) -> int:
                 )
 
             knee_ema = ema.update(knee_deg)
-            is_standing = (knee_ema is not None) and (knee_ema >= args.stand_deg)
+            is_standing = (knee_ema is not None) and (knee_ema >= args.stand_th)
 
             # Keep history for pre padding.
             frame_hist.append(frame.copy())
@@ -543,7 +544,7 @@ def process_one_video(video_path: str, args: argparse.Namespace) -> int:
                         else "knee_raw(avg)=NA"
                     ),
                     (f"knee_ema={knee_ema:.1f}" if knee_ema is not None else "knee_ema=NA"),
-                    f"STAND if knee_ema >= {args.stand_deg:.1f} -> {is_standing}",
+                    f"STAND if knee_ema >= {args.stand_th:.1f} -> {is_standing}",
                     f"in_stand={in_stand} seg_len={len(stand_frames)} min={args.min_stand_frames}",
                     f"pad_pre={args.pad_pre} pad_post={args.pad_post}",
                 ]
