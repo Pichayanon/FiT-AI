@@ -1,10 +1,24 @@
 """
-  python extract_bottom_squat.py --video path/to/video.mp4 --label dataset_correct --show
-  python extract_bottom_squat.py --video path/to/video.mp4 --label knees_in --show
+Extract bottom-phase snippets from squat video(s) (around knee-angle minima).
+
+--video can be a single file OR a folder containing videos.
+
+Labels:
+  good_squat       — correct squat form
+  knee_ins         — knees collapse inward
+  round_back       — excessive forward lean / rounded back
+  not_deep_enough  — squat depth insufficient
+
+Usage:
+  python squat/extract_bottom_squat.py --video path.mp4 --label good_squat --show
+  python squat/extract_bottom_squat.py --video dataset/squat/good_squat/ --label good_squat
+
+Output: dataset/squat/dataset_bottom/<vidname>_<label>_snip<NNN>.npz
 """
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 from collections import deque
 from dataclasses import dataclass
@@ -302,9 +316,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     :returns: configured ArgumentParser
     """
     ap = argparse.ArgumentParser()
-    ap.add_argument("--video", required=True)
-    ap.add_argument("--label", required=True, choices=["dataset_correct", "knees_in"])
-    ap.add_argument("--outdir", default="dataset_bottom")
+    ap.add_argument("--video", required=True, help="single video file OR folder of videos")
+    ap.add_argument(
+        "--label", required=True,
+        choices=["good_squat", "knee_ins", "round_back", "not_deep_enough"],
+        help="good_squat | knee_ins | round_back | not_deep_enough",
+    )
+    ap.add_argument("--outdir", default="dataset/squat/dataset_bottom")
     ap.add_argument("--pre", type=int, default=15, help="frames before bottom")
     ap.add_argument("--post", type=int, default=15, help="frames after bottom")
     ap.add_argument("--ema_alpha", type=float, default=0.3)
@@ -319,20 +337,53 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def main() -> None:
-    """Run extraction from a video and save bottom snippets.
+# -----------------------------
+# Video file extensions
+# -----------------------------
+VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v")
 
-    :returns: None
-    :raises: RuntimeError if video cannot be opened or writer fails
+
+def collect_video_paths(path: str) -> List[str]:
+    """Return a sorted list of video file paths.
+
+    If *path* is a file, return it as a single-element list.
+    If *path* is a directory, glob all video files inside (non-recursive).
+
+    :param path: file or directory path
+    :returns: list of absolute video paths
+    :raises: FileNotFoundError if path does not exist
     """
-    args = build_arg_parser().parse_args()
+    if os.path.isfile(path):
+        return [path]
+    if os.path.isdir(path):
+        files: List[str] = []
+        for ext in VIDEO_EXTS:
+            files.extend(glob.glob(os.path.join(path, f"*{ext}")))
+            files.extend(glob.glob(os.path.join(path, f"*{ext.upper()}")))
+        files = sorted(set(files))
+        if not files:
+            raise FileNotFoundError(f"No video files found in: {path}")
+        return files
+    raise FileNotFoundError(f"Path does not exist: {path}")
 
-    os.makedirs(args.outdir, exist_ok=True)
-    vidname = os.path.splitext(os.path.basename(args.video))[0]
 
-    cap = cv2.VideoCapture(args.video)
+# -----------------------------
+# Process one video
+# -----------------------------
+
+def process_one_video(video_path: str, args: argparse.Namespace) -> int:
+    """Extract bottom snippets from a single video.
+
+    :param video_path: path to the video file
+    :param args: CLI arguments
+    :returns: number of snippets saved
+    """
+    vidname = os.path.splitext(os.path.basename(video_path))[0]
+
+    cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise RuntimeError("Cannot open: " + args.video)
+        print(f"[WARN] Cannot open: {video_path}, skipping.")
+        return 0
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -492,9 +543,34 @@ def main() -> None:
 
     cap.release()
     cv2.destroyAllWindows()
+    return snip_count
 
-    print(f"Done. Total snippets: {snip_count}")
-    print(f"Output folder: {args.outdir}")
+
+# -----------------------------
+# Main
+# -----------------------------
+
+def main() -> None:
+    """Run bottom snippet extraction from one or more videos.
+
+    :returns: None
+    """
+    args = build_arg_parser().parse_args()
+    os.makedirs(args.outdir, exist_ok=True)
+
+    video_paths = collect_video_paths(args.video)
+    print(f"[BATCH] {len(video_paths)} video(s) to process, label={args.label}")
+    print(f"[BATCH] output: {args.outdir}")
+
+    total_snips = 0
+    for i, vp in enumerate(video_paths, 1):
+        print(f"\n[{i}/{len(video_paths)}] {os.path.basename(vp)}")
+        n = process_one_video(vp, args)
+        print(f"  -> {n} snippet(s)")
+        total_snips += n
+
+    print(f"\n[DONE] Total: {total_snips} bottom snippets from {len(video_paths)} video(s)")
+    print(f"[DONE] Output folder: {args.outdir}")
 
 
 if __name__ == "__main__":

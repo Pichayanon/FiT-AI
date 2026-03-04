@@ -12,14 +12,15 @@ Server: status, phase, result (mode=bottom|stand), info
 
 from __future__ import annotations
 
+import argparse
+import base64
+import json
 import os
 import time
-import json
-import base64
-import argparse
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, Tuple, List
+import traceback
 from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 import cv2
@@ -34,12 +35,15 @@ from fastapi.middleware.cors import CORSMiddleware
 # -----------------------------
 # Config
 # -----------------------------
-TCN_MODEL_PATH   = "squat/models/squat_knees_in_tcn.pt"
-STAND_MODEL_PATH = "squat/models/feet_too_close_tcn.pt"
+TCN_MODEL_PATH   = "squat/models/squat_bottom_tcn.pt"
+STAND_MODEL_PATH = "squat/models/squat_stand_tcn.pt"
 # Phase TCN from train_squat_phase (10-dim, window 30, 2 classes: eccentric / concentric)
 PHASE_MODEL_PATH = "squat/models/squat_phase_tcn.pt"
 
-FEATURE_MODE = "A"   # "A" (111 dims) or "RAW" (132 dims)
+STAND_FEATURE_DIM = 16   # focused stand features (width ratios + X positions + angles + distances)
+BOTTOM_FEATURE_DIM = 41  # focused bottom features (10-joint xyz + angles + width ratios)
+
+KEY_JOINTS = [7, 8, 11, 12, 23, 24, 25, 26, 27, 28]  # L/R: ear, sho, hip, knee, ankle
 
 PRE_FRAMES  = 5
 POST_FRAMES = 5
@@ -47,9 +51,9 @@ POST_FRAMES = 5
 MIN_GAP = 18  # min frames between bottom events (eccentric→concentric)
 
 # Stand gate (rule-based): only used to decide when to run stand model
-# Robust: knees near-straight + stable (not currently moving)
-STAND_KNEE_ANGLE_DEG_TH = 170.0
-STAND_KNEE_DELTA_MAX_DEG = 2.0
+# Relaxed: allow slight bend and movement so user gets feedback while adjusting stance
+STAND_KNEE_ANGLE_DEG_TH = 155.0
+STAND_KNEE_DELTA_MAX_DEG = 5.0
 
 READY_STREAK_N = 3
 
@@ -74,7 +78,7 @@ STAND_MIN_STREAK     = 6
 STAND_PRED_COOLDOWN  = 12
 STAND_WIN_FRAMES     = PRE_FRAMES + POST_FRAMES + 1
 
-STAND_OK_LABELS = {"stand_ok"}
+STAND_OK_LABELS = {"good_stand"}
 GOAL_GOOD_REPS = 5
 
 DEBUG = True
@@ -378,19 +382,6 @@ def angle_3pts(a, b, c) -> float:
     return float(np.degrees(np.arccos(cosang)))
 
 
-def landmarks_to_flat(lm) -> np.ndarray:
-    """
-    Flatten 33 pose landmarks into (132,) [x,y,z,vis] * 33.
-    """
-    arr = np.zeros((33, 4), dtype=np.float32)
-    for i in range(33):
-        arr[i, 0] = lm[i].x
-        arr[i, 1] = lm[i].y
-        arr[i, 2] = lm[i].z
-        arr[i, 3] = lm[i].visibility
-    return arr.reshape(-1).astype(np.float32)  # (132,)
-
-
 def resample_time(x: np.ndarray, target_T: int) -> np.ndarray:
     """
     Linear interpolate over time axis to target_T.
@@ -514,7 +505,7 @@ def draw_overlay(
     put(f"Phase: {phase}")
     put(f"Knee: {knee_raw:.1f}" if knee_raw is not None else "Knee: NA")
     put(
-        f"feat={FEATURE_MODE} dim={feat_dim} | bottom=ecc→conc stand=knee>={STAND_KNEE_ANGLE_DEG_TH:.0f} & Δ<={STAND_KNEE_DELTA_MAX_DEG:.1f}",
+        f"stand={STAND_FEATURE_DIM}d bottom={BOTTOM_FEATURE_DIM}d | ecc→conc knee>={STAND_KNEE_ANGLE_DEG_TH:.0f} Δ<={STAND_KNEE_DELTA_MAX_DEG:.1f}",
         0.55
     )
 
@@ -549,7 +540,6 @@ def tcn_predict(model, inv_labels: Dict[int, str], target_T: int, X_win: np.ndar
         (pred_label, conf, probs)
     """
     X = resample_time(X_win.astype(np.float32), int(target_T))
-    X = normalize_per_sample(X)
     xt = torch.from_numpy(X).unsqueeze(0)  # (1,T,D)
     with torch.no_grad():
         logits = model(xt)
@@ -561,7 +551,7 @@ def tcn_predict(model, inv_labels: Dict[int, str], target_T: int, X_win: np.ndar
 
 
 # -----------------------------
-# Feature Set A (111 dims)
+# Focused Feature Extractors (matching training scripts)
 # -----------------------------
 def _safe_norm(v: np.ndarray, eps: float = 1e-6) -> float:
     return float(np.sqrt(np.sum(v * v)) + eps)
@@ -579,20 +569,27 @@ def _angle_3pts_np(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
     return float(np.degrees(np.arccos(cosang)))
 
 
-def extract_feature_A_from_landmarks(lm) -> np.ndarray:
-    """
-    lm: MediaPipe landmark list length 33
-    returns per-frame feature: (111,)
-      A1) body-centric xyz normalized (origin=mid-hip, scale=hip_width) -> 99
-      A2) dist/ratio (hip_w, sho_w, ankle_w, knee_w, ankle/hip, knee/hip, sho/hip) -> 7
-      A3) angles (knee_L, knee_R, hip_L, hip_R, torso_tilt) -> 5
-    """
+def _get_xyz(lm) -> np.ndarray:
+    """Extract (33, 3) xyz from MediaPipe landmarks."""
     xyz = np.zeros((33, 3), dtype=np.float32)
     for i in range(33):
         xyz[i, 0] = lm[i].x
         xyz[i, 1] = lm[i].y
         xyz[i, 2] = lm[i].z
+    return xyz
 
+
+def extract_stand_features_from_lm(lm) -> np.ndarray:
+    """Focused stand features (16 dims) — matches train_squat_stand.py.
+
+    [0-3]  width ratios: ankle/hip, ankle/sho, knee/hip, knee/sho
+    [4-9]  x positions (norm by hip width): L/R ankle,knee,hip
+    [10-12] angles/180: knee_L, knee_R, torso_tilt
+    [13]   feet distance (ankle_w / scale)
+    [14]   shoulder distance (sho_w / scale)
+    [15]   feet/shoulder ratio (ankle_w / sho_w)
+    """
+    xyz = _get_xyz(lm)
     lhip, rhip = xyz[L_HIP], xyz[R_HIP]
     lsho, rsho = xyz[L_SHO], xyz[R_SHO]
     lkne, rkne = xyz[L_KNE], xyz[R_KNE]
@@ -601,83 +598,94 @@ def extract_feature_A_from_landmarks(lm) -> np.ndarray:
     mid_hip = 0.5 * (lhip + rhip)
     hip_w = _dist(lhip, rhip)
     sho_w = _dist(lsho, rsho)
+    ankle_w = _dist(lank, rank)
+    knee_w = _dist(lkne, rkne)
     scale = hip_w if hip_w > 1e-4 else (sho_w if sho_w > 1e-4 else 1.0)
 
-    # A1: body-centric xyz
-    p_norm = (xyz - mid_hip) / (scale + 1e-6)        # (33,3)
-    feat_xyz = p_norm.reshape(-1).astype(np.float32) # (99,)
-
-    # A2: distances / ratios
-    ankle_w = _dist(lank, rank)
-    knee_w  = _dist(lkne, rkne)
-    ankle_hip = ankle_w / (scale + 1e-6)
-    knee_hip  = knee_w / (scale + 1e-6)
-    sho_hip   = sho_w / (scale + 1e-6)
-
-    feat_dist = np.array(
-        [hip_w, sho_w, ankle_w, knee_w, ankle_hip, knee_hip, sho_hip],
-        dtype=np.float32
-    )
-
-    # A3: angles
-    knee_L = _angle_3pts_np(lhip, lkne, lank)
-    knee_R = _angle_3pts_np(rhip, rkne, rank)
-    hip_L  = _angle_3pts_np(lsho, lhip, lkne)
-    hip_R  = _angle_3pts_np(rsho, rhip, rkne)
-
+    out = np.zeros(16, dtype=np.float32)
+    out[0] = ankle_w / (hip_w + 1e-6)
+    out[1] = ankle_w / (sho_w + 1e-6)
+    out[2] = knee_w / (hip_w + 1e-6)
+    out[3] = knee_w / (sho_w + 1e-6)
+    out[4] = (lank[0] - mid_hip[0]) / (scale + 1e-6)
+    out[5] = (rank[0] - mid_hip[0]) / (scale + 1e-6)
+    out[6] = (lkne[0] - mid_hip[0]) / (scale + 1e-6)
+    out[7] = (rkne[0] - mid_hip[0]) / (scale + 1e-6)
+    out[8] = (lhip[0] - mid_hip[0]) / (scale + 1e-6)
+    out[9] = (rhip[0] - mid_hip[0]) / (scale + 1e-6)
+    out[10] = _angle_3pts_np(lhip, lkne, lank) / 180.0
+    out[11] = _angle_3pts_np(rhip, rkne, rank) / 180.0
     mid_sho = 0.5 * (lsho + rsho)
     v = (mid_sho - mid_hip).astype(np.float32)
     up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
     denom = (_safe_norm(v) * _safe_norm(up)) + 1e-6
     cosang = float(np.clip(np.dot(v, up) / denom, -1.0, 1.0))
-    torso_tilt = float(np.degrees(np.arccos(cosang)))
+    out[12] = float(np.degrees(np.arccos(cosang))) / 180.0
 
-    feat_ang = np.array([knee_L, knee_R, hip_L, hip_R, torso_tilt], dtype=np.float32)
+    out[13] = ankle_w / (scale + 1e-6)
+    out[14] = sho_w / (scale + 1e-6)
+    out[15] = ankle_w / (sho_w + 1e-6)
 
-    return np.concatenate([feat_xyz, feat_dist, feat_ang], axis=0).astype(np.float32)  # (111,)
+    return out
 
+def extract_bottom_features_from_lm(lm) -> np.ndarray:
+    """Focused bottom features (41 dims) — matches train_squat_bottom.py.
 
-def extract_stream_feature(lm) -> np.ndarray:
+    [0-29]  10 key joints × 3 xyz (body-centric, hip-width normalized)
+    [30-36] angles / 180: knee_L, knee_R, hip_L, hip_R, torso_tilt, neck_tilt, spine
+    [37-40] width ratios: knee/hip, knee/ankle, ankle/hip, sho/hip
     """
-    Return per-frame feature vector consistent with FEATURE_MODE.
-    """
-    if FEATURE_MODE == "RAW":
-        return landmarks_to_flat(lm)  # (132,)
-    if FEATURE_MODE == "A":
-        return extract_feature_A_from_landmarks(lm)  # (111,)
-    raise ValueError(f"Invalid FEATURE_MODE={FEATURE_MODE}")
+    xyz = _get_xyz(lm)
+    lear, rear = xyz[7], xyz[8]
+    lhip, rhip = xyz[23], xyz[24]
+    lsho, rsho = xyz[11], xyz[12]
+    lkne, rkne = xyz[25], xyz[26]
+    lank, rank = xyz[27], xyz[28]
 
+    mid_hip = 0.5 * (lhip + rhip)
+    hip_w = _dist(lhip, rhip)
+    sho_w = _dist(lsho, rsho)
+    scale = hip_w if hip_w > 1e-4 else (sho_w if sho_w > 1e-4 else 1.0)
 
-def _expected_dim() -> Optional[int]:
-    """
-    Expected feature dim for current FEATURE_MODE.
-    """
-    if FEATURE_MODE == "RAW":
-        return 132
-    if FEATURE_MODE == "A":
-        return 111
-    return None
+    out = np.zeros(BOTTOM_FEATURE_DIM, dtype=np.float32)
 
+    # Body-centric xyz for 10 key joints (30 dims)
+    for i, j_idx in enumerate(KEY_JOINTS):
+        normed = (xyz[j_idx] - mid_hip) / (scale + 1e-6)
+        out[i*3:(i+1)*3] = normed
 
-# -----------------------------
-# FeatureExtractor (same role as wall-sit: per-frame features for model)
-# -----------------------------
-class FeatureExtractor:
-    """Per-frame feature vector (Feature A or RAW) for squat TCNs."""
+    # Angles
+    out[30] = _angle_3pts_np(lhip, lkne, lank) / 180.0
+    out[31] = _angle_3pts_np(rhip, rkne, rank) / 180.0
+    out[32] = _angle_3pts_np(lsho, lhip, lkne) / 180.0
+    out[33] = _angle_3pts_np(rsho, rhip, rkne) / 180.0
 
-    def __init__(self, feature_mode: str) -> None:
-        self.feature_mode = feature_mode
+    mid_sho = 0.5 * (lsho + rsho)
+    mid_ear = 0.5 * (lear + rear)
+    up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
 
-    def extract(self, lm) -> np.ndarray:
-        if self.feature_mode == "RAW":
-            return landmarks_to_flat(lm)
-        if self.feature_mode == "A":
-            return extract_feature_A_from_landmarks(lm)
-        raise ValueError(f"Invalid feature_mode={self.feature_mode}")
+    v = (mid_sho - mid_hip).astype(np.float32)
+    denom = (_safe_norm(v) * _safe_norm(up)) + 1e-6
+    cosang = float(np.clip(np.dot(v, up) / denom, -1.0, 1.0))
+    out[34] = float(np.degrees(np.arccos(cosang))) / 180.0
 
+    v_neck = (mid_ear - mid_sho).astype(np.float32)
+    denom_neck = (_safe_norm(v_neck) * _safe_norm(up)) + 1e-6
+    cosang_neck = float(np.clip(np.dot(v_neck, up) / denom_neck, -1.0, 1.0))
+    out[35] = float(np.degrees(np.arccos(cosang_neck))) / 180.0
 
-# -----------------------------
-# StatusSender (same role as wall-sit: send status/info; + send_phase for squat)
+    out[36] = _angle_3pts_np(mid_ear, mid_sho, mid_hip) / 180.0
+
+    # Width ratios
+    knee_w = _dist(lkne, rkne)
+    ankle_w = _dist(lank, rank)
+    out[37] = knee_w / (hip_w + 1e-6)
+    out[38] = knee_w / (ankle_w + 1e-6)
+    out[39] = ankle_w / (hip_w + 1e-6)
+    out[40] = sho_w / (hip_w + 1e-6)
+
+    return out
+
 # -----------------------------
 class StatusSender:
     def __init__(self, every_n_frames: int, phase_every_n: int = 2) -> None:
@@ -778,7 +786,7 @@ class StreamState:
     last_sent_bottom_event_i: int = -10**9
     last_sent_stand_label: str = ""
 
-    # history for window cutting: (i, feat(D), frame_for_overlay, knee_raw, knee_ema)
+    # history for window cutting: (i, stand_feat(13), bottom_feat(33), frame_for_overlay, knee_raw, knee_ema)
     hist: deque = field(default_factory=lambda: deque(maxlen=PRE_FRAMES + POST_FRAMES + 240))
 
     # phase TCN buffer (10-dim from extract_phase_features)
@@ -791,15 +799,15 @@ class StreamState:
 
 
 def update_rep_counter(st: StreamState, event_i: int, pred_label: str) -> None:
-    """Count once per event. Good rep: pred_label != 'knees_in'; Bad: pred_label == 'knees_in'."""
+    """Count once per event. Good rep: label starts with 'good'; Bad: anything else."""
     if event_i == st.last_counted_event_i:
         return
     st.last_counted_event_i = event_i
     st.total_reps += 1
-    if pred_label == "knees_in":
-        st.bad_reps += 1
-    else:
+    if pred_label.startswith("good"):
         st.good_reps += 1
+    else:
+        st.bad_reps += 1
 
 
 # -----------------------------
@@ -809,7 +817,6 @@ model_service = SquatModelService(TCN_MODEL_PATH, STAND_MODEL_PATH, PHASE_MODEL_
 front_view_gate = FrontViewGate(
     mp_pose, FRONT_VIS_TH, FRONT_MIN_SHOULDER_X_GAP, FRONT_MIN_HIP_X_GAP
 )
-feature_extractor = FeatureExtractor(FEATURE_MODE)
 status_sender = StatusSender(STATUS_SEND_EVERY_N_FRAMES, PHASE_SEND_EVERY_N_FRAMES)
 
 
@@ -817,8 +824,8 @@ status_sender = StatusSender(STATUS_SEND_EVERY_N_FRAMES, PHASE_SEND_EVERY_N_FRAM
 def health() -> Dict[str, Any]:
     return {
         "status": "ok",
-        "feature_mode": FEATURE_MODE,
-        "expected_dim": _expected_dim(),
+        "stand_feature_dim": STAND_FEATURE_DIM,
+        "bottom_feature_dim": BOTTOM_FEATURE_DIM,
         "bottom_loaded": model_service.bottom_loaded,
         "stand_loaded": model_service.stand_loaded,
         "phase_loaded": model_service.phase_loaded,
@@ -842,7 +849,6 @@ class SquatWebSocketSession:
         websocket: WebSocket,
         model_svc: SquatModelService,
         gate: FrontViewGate,
-        feat: FeatureExtractor,
         status: StatusSender,
         ready_streak_n: int,
         debug: bool,
@@ -850,7 +856,6 @@ class SquatWebSocketSession:
         self.ws = websocket
         self.model_svc = model_svc
         self.gate = gate
-        self.feat = feat
         self.status = status
         self.ready_streak_n = ready_streak_n
         self.debug = debug
@@ -870,16 +875,15 @@ class SquatWebSocketSession:
     async def run(self) -> None:
         await self.ws.accept()
 
-        exp_dim = _expected_dim()
-        if self.model_svc.bottom_loaded and exp_dim != self.model_svc.bottom_in_dim:
+        if self.model_svc.bottom_loaded and BOTTOM_FEATURE_DIM != self.model_svc.bottom_in_dim:
             await self.status.send_info(
                 self.ws,
-                f"WARNING: Bottom model in_dim={self.model_svc.bottom_in_dim} but FEATURE_MODE={FEATURE_MODE} gives dim={exp_dim}",
+                f"WARNING: Bottom model in_dim={self.model_svc.bottom_in_dim} but extractor gives dim={BOTTOM_FEATURE_DIM}",
             )
-        if self.model_svc.stand_loaded and exp_dim != self.model_svc.stand_in_dim:
+        if self.model_svc.stand_loaded and STAND_FEATURE_DIM != self.model_svc.stand_in_dim:
             await self.status.send_info(
                 self.ws,
-                f"WARNING: Stand model in_dim={self.model_svc.stand_in_dim} but FEATURE_MODE={FEATURE_MODE} gives dim={exp_dim}",
+                f"WARNING: Stand model in_dim={self.model_svc.stand_in_dim} but extractor gives dim={STAND_FEATURE_DIM}",
             )
 
         await self.status.send_info(
@@ -887,7 +891,8 @@ class SquatWebSocketSession:
             "WebSocket connected",
             {
                 "record_dir": os.path.abspath(RECORD_DIR),
-                "feature_mode": FEATURE_MODE,
+                "stand_feature_dim": STAND_FEATURE_DIM,
+                "bottom_feature_dim": BOTTOM_FEATURE_DIM,
                 "front_gate": {
                     "vis_th": FRONT_VIS_TH,
                     "min_sho_gap": FRONT_MIN_SHOULDER_X_GAP,
@@ -922,6 +927,7 @@ class SquatWebSocketSession:
             return
         except Exception as e:
             print(f"[WS] error: {e}")
+            print(traceback.format_exc())
             await self._cleanup_recording()
             try:
                 await self.status.send_info(self.ws, f"Server error: {e}")
@@ -1158,7 +1164,8 @@ class SquatWebSocketSession:
             f"knee={knee_raw:.1f} Δ={knee_delta:.1f}"
         )
 
-        feat = self.feat.extract(lm)
+        stand_feat = extract_stand_features_from_lm(lm)
+        bottom_feat = extract_bottom_features_from_lm(lm)
 
         self.st.phase_feat_buffer.append(extract_phase_features(lm))
         if self.model_svc.phase_loaded and len(self.st.phase_feat_buffer) >= self.model_svc.phase_window:
@@ -1175,7 +1182,7 @@ class SquatWebSocketSession:
                 self.st.last_phase_bottom_i = self.frame_i
         self.st.prev_phase = phase
 
-        self.st.hist.append((self.frame_i, feat, frame.copy(), knee_raw, None))
+        self.st.hist.append((self.frame_i, stand_feat, bottom_feat, frame.copy(), knee_raw, None))
         # NOTE: stand_streak is maintained by the stand gate above
 
         pred_text = ""
@@ -1206,7 +1213,7 @@ class SquatWebSocketSession:
             stand_gate_text=stand_gate_text,
             stand_pred_text=stand_pred_text if stand_pred_text else None,
             rep_text=rep_text,
-            feat_dim=int(feat.shape[0]),
+            feat_dim=BOTTOM_FEATURE_DIM,
             gate_text=f"FRONT GATE: OK (sho_gap={gate_dbg.get('sho_gap')} hip_gap={gate_dbg.get('hip_gap')})",
         )
 
@@ -1240,13 +1247,14 @@ class SquatWebSocketSession:
                         "event_i": int(event_i),
                         "window_frames": int(len(win)),
                         "T": int(self.model_svc.bottom_T),
-                        "D": int(win[0][1].shape[0]),
+                        "D": BOTTOM_FEATURE_DIM,
                     },
                 )
-                X_win = np.stack([r[1] for r in win], axis=0).astype(np.float32)
+                X_win = np.stack([r[2] for r in win], axis=0).astype(np.float32)
                 pred_label, conf, _ = self.model_svc.predict_bottom(X_win)
                 self.st.last_pred_label = pred_label
                 self.st.last_pred_conf = conf
+                is_good = pred_label.startswith("good")
                 update_rep_counter(self.st, int(event_i), pred_label)
                 payload = {
                     "type": "result",
@@ -1257,7 +1265,7 @@ class SquatWebSocketSession:
                     "event_i": int(event_i),
                     "window": {"pre": PRE_FRAMES, "post": POST_FRAMES},
                     "T": int(self.model_svc.bottom_T),
-                    "feature_mode": FEATURE_MODE,
+                    "feature_dim": BOTTOM_FEATURE_DIM,
                     "reps": {
                         "total": int(self.st.total_reps),
                         "correct": int(self.st.good_reps),
@@ -1266,8 +1274,8 @@ class SquatWebSocketSession:
                         "good": int(self.st.good_reps),
                         "bad": int(self.st.bad_reps),
                         "goal_good": int(GOAL_GOOD_REPS),
-                        "is_correct_rep": bool(pred_label != "knees_in"),
-                        "is_good_rep": bool(pred_label != "knees_in"),
+                        "is_correct_rep": bool(is_good),
+                        "is_good_rep": bool(is_good),
                     },
                 }
                 if self.debug:
@@ -1294,13 +1302,14 @@ class SquatWebSocketSession:
                         "event_i": int(event_i2),
                         "window_frames": int(len(win)),
                         "T": int(self.model_svc.bottom_T),
-                        "D": int(win[0][1].shape[0]),
+                        "D": BOTTOM_FEATURE_DIM,
                     },
                 )
-                X_win = np.stack([r[1] for r in win], axis=0).astype(np.float32)
+                X_win = np.stack([r[2] for r in win], axis=0).astype(np.float32)
                 pred_label, conf, _ = self.model_svc.predict_bottom(X_win)
                 self.st.last_pred_label = pred_label
                 self.st.last_pred_conf = conf
+                is_good = pred_label.startswith("good")
                 update_rep_counter(self.st, int(event_i2), pred_label)
                 payload = {
                     "type": "result",
@@ -1311,7 +1320,7 @@ class SquatWebSocketSession:
                     "event_i": int(event_i2),
                     "window": {"pre": PRE_FRAMES, "post": POST_FRAMES},
                     "T": int(self.model_svc.bottom_T),
-                    "feature_mode": FEATURE_MODE,
+                    "feature_dim": BOTTOM_FEATURE_DIM,
                     "reps": {
                         "total": int(self.st.total_reps),
                         "correct": int(self.st.good_reps),
@@ -1320,8 +1329,8 @@ class SquatWebSocketSession:
                         "good": int(self.st.good_reps),
                         "bad": int(self.st.bad_reps),
                         "goal_good": int(GOAL_GOOD_REPS),
-                        "is_correct_rep": bool(pred_label != "knees_in"),
-                        "is_good_rep": bool(pred_label != "knees_in"),
+                        "is_correct_rep": bool(is_good),
+                        "is_good_rep": bool(is_good),
                     },
                 }
                 if self.debug:
@@ -1357,7 +1366,7 @@ class SquatWebSocketSession:
                 "session_id": self.st.session_id,
                 "frame_i": int(self.frame_i),
                 "T": int(self.model_svc.stand_T),
-                "feature_mode": FEATURE_MODE,
+                "feature_dim": STAND_FEATURE_DIM,
                 "stand_ok": bool(is_ok),
             }
             if self.debug:
@@ -1373,7 +1382,6 @@ async def ws_video(websocket: WebSocket) -> None:
         websocket=websocket,
         model_svc=model_service,
         gate=front_view_gate,
-        feat=feature_extractor,
         status=status_sender,
         ready_streak_n=READY_STREAK_N,
         debug=DEBUG,

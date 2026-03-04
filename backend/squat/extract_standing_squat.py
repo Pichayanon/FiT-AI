@@ -1,11 +1,24 @@
 """
-  python extract_standing_squat.py --video path.mp4 --label stand_ok --show
-  python extract_standing_squat.py --video path.mp4 --label stand_too_narrow --show
+Extract standing-phase segments from squat video(s).
+
+--video can be a single file OR a folder containing videos.
+
+Labels:
+  good_stand       — correct stance width
+  stand_too_narrow — feet too close together
+  stand_too_wide   — feet too far apart
+
+Usage:
+  python squat/extract_standing_squat.py --video path.mp4 --label good_stand --show
+  python squat/extract_standing_squat.py --video dataset/squat/good_stand/ --label good_stand
+
+Output: dataset/squat/dataset_standing/<vidname>_<label>_stand<NNN>_f<start>-<end>.npz
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 from collections import deque
 from dataclasses import dataclass
@@ -261,14 +274,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     :returns: configured ArgumentParser
     """
     ap = argparse.ArgumentParser()
-    ap.add_argument("--video", required=True)
-    ap.add_argument("--label", required=True, help="e.g. stand_ok or stand_too_narrow")
-    ap.add_argument("--outdir", default="dataset_standing")
+    ap.add_argument("--video", required=True, help="single video file OR folder of videos")
+    ap.add_argument(
+        "--label", required=True,
+        choices=["good_stand", "stand_too_narrow", "stand_too_wide"],
+        help="good_stand | stand_too_narrow | stand_too_wide",
+    )
+    ap.add_argument("--outdir", default="dataset/squat/dataset_standing")
 
     # Standing definition
-    ap.add_argument("--ema_alpha", type=float, default=0.30)
-    ap.add_argument("--stand_deg", type=float, default=165.0, help="standing if knee_ema >= this")
-    ap.add_argument("--min_stand_frames", type=int, default=12, help="min consecutive standing frames to save segment")
+    ap.add_argument("--stand_th", type=float, default=155.0, help="knee >= this is standing")
+    ap.add_argument("--stand_delta", type=float, default=5.0, help="knee change <= this")
+    ap.add_argument("--streak", type=int, default=3, help="need this many stable frames")
 
     # Segment trimming
     ap.add_argument("--pad_pre", type=int, default=0, help="include extra frames before stand start (if available)")
@@ -283,23 +300,52 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 # -----------------------------
-# Main
+# Video file extensions
+# -----------------------------
+VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v")
+
+
+def collect_video_paths(path: str) -> List[str]:
+    """Return a sorted list of video file paths.
+
+    If *path* is a file, return it as a single-element list.
+    If *path* is a directory, glob all video files inside (non-recursive).
+
+    :param path: file or directory path
+    :returns: list of absolute video paths
+    :raises: FileNotFoundError if path does not exist
+    """
+    if os.path.isfile(path):
+        return [path]
+    if os.path.isdir(path):
+        files: List[str] = []
+        for ext in VIDEO_EXTS:
+            files.extend(glob.glob(os.path.join(path, f"*{ext}")))
+            files.extend(glob.glob(os.path.join(path, f"*{ext.upper()}")))
+        files = sorted(set(files))
+        if not files:
+            raise FileNotFoundError(f"No video files found in: {path}")
+        return files
+    raise FileNotFoundError(f"Path does not exist: {path}")
+
+
+# -----------------------------
+# Process one video
 # -----------------------------
 
-def main() -> None:
-    """Run standing segment extraction from a video.
+def process_one_video(video_path: str, args: argparse.Namespace) -> int:
+    """Extract standing segments from a single video.
 
-    :returns: None
-    :raises: RuntimeError if video cannot be opened or writer fails
+    :param video_path: path to the video file
+    :param args: CLI arguments
+    :returns: number of segments saved
     """
-    args = build_arg_parser().parse_args()
+    vidname = os.path.splitext(os.path.basename(video_path))[0]
 
-    os.makedirs(args.outdir, exist_ok=True)
-    vidname = os.path.splitext(os.path.basename(args.video))[0]
-
-    cap = cv2.VideoCapture(args.video)
+    cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise RuntimeError("Cannot open: " + args.video)
+        print(f"[WARN] Cannot open: {video_path}, skipping.")
+        return 0
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -510,8 +556,34 @@ def main() -> None:
 
     cap.release()
     cv2.destroyAllWindows()
-    print(f"Done. Total standing segments: {seg_count}")
-    print(f"Output folder: {args.outdir}")
+    return seg_count
+
+
+# -----------------------------
+# Main
+# -----------------------------
+
+def main() -> None:
+    """Run standing segment extraction from one or more videos.
+
+    :returns: None
+    """
+    args = build_arg_parser().parse_args()
+    os.makedirs(args.outdir, exist_ok=True)
+
+    video_paths = collect_video_paths(args.video)
+    print(f"[BATCH] {len(video_paths)} video(s) to process, label={args.label}")
+    print(f"[BATCH] output: {args.outdir}")
+
+    total_segs = 0
+    for i, vp in enumerate(video_paths, 1):
+        print(f"\n[{i}/{len(video_paths)}] {os.path.basename(vp)}")
+        n = process_one_video(vp, args)
+        print(f"  -> {n} segment(s)")
+        total_segs += n
+
+    print(f"\n[DONE] Total: {total_segs} standing segments from {len(video_paths)} video(s)")
+    print(f"[DONE] Output folder: {args.outdir}")
 
 
 if __name__ == "__main__":
