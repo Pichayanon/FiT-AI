@@ -50,10 +50,9 @@ def extract_features(video_path: str):
     cap = cv2.VideoCapture(video_path)
     pose = mp_pose.Pose()
 
+    hip_signed_distances = []
     body_angles = []
-    hip_deviations = []
-    torso_slopes = []
-    hip_heights = []
+    normalized_hip_heights = []
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -67,6 +66,7 @@ def extract_features(video_path: str):
 
         lm = res.pose_landmarks.landmark
 
+        # เลือกด้านที่ visibility สูงกว่า
         right_vis = lm[mp_pose.PoseLandmark.RIGHT_HIP].visibility
         left_vis = lm[mp_pose.PoseLandmark.LEFT_HIP].visibility
         is_right = right_vis > left_vis
@@ -80,54 +80,46 @@ def extract_features(video_path: str):
             hip = lm[mp_pose.PoseLandmark.LEFT_HIP]
             ankle = lm[mp_pose.PoseLandmark.LEFT_ANKLE]
 
-        shoulder_xy = [shoulder.x, shoulder.y]
-        hip_xy = [hip.x, hip.y]
-        ankle_xy = [ankle.x, ankle.y]
+        shoulder_xy = np.array([shoulder.x, shoulder.y])
+        hip_xy = np.array([hip.x, hip.y])
+        ankle_xy = np.array([ankle.x, ankle.y])
 
-        # 1️⃣ Body angle
+        # -------------------------
+        # 1️⃣ Signed distance ของ hip จากเส้น shoulder-ankle
+        # -------------------------
+        line_vec = ankle_xy - shoulder_xy
+        hip_vec = hip_xy - shoulder_xy
+
+        signed_dist = np.cross(line_vec, hip_vec) / (np.linalg.norm(line_vec) + 1e-6)
+        hip_signed_distances.append(signed_dist)
+
+        # -------------------------
+        # 2️⃣ Body angle (shoulder-hip-ankle)
+        # -------------------------
         body_angle = angle(shoulder_xy, hip_xy, ankle_xy)
         body_angles.append(body_angle)
 
-        # 2️⃣ Torso slope
-        slope = (ankle.y - shoulder.y) / (ankle.x - shoulder.x + 1e-6)
-        torso_slopes.append(slope)
-
-        # 3️⃣ Hip deviation from shoulder-ankle line
-        dev = np.abs(
-            np.cross(
-                np.array(ankle_xy) - np.array(shoulder_xy),
-                np.array(shoulder_xy) - np.array(hip_xy),
-            )
-        ) / (np.linalg.norm(np.array(ankle_xy) - np.array(shoulder_xy)) + 1e-6)
-
-        hip_deviations.append(dev)
-
-        # 4️⃣ Relative hip height
-        mean_ref_y = 0.5 * (shoulder.y + ankle.y)
-        hip_height = hip.y - mean_ref_y
-        hip_heights.append(hip_height)
+        # -------------------------
+        # 3️⃣ Normalized hip height
+        # -------------------------
+        body_length = np.linalg.norm(ankle_xy - shoulder_xy) + 1e-6
+        hip_height_norm = (hip.y - 0.5*(shoulder.y + ankle.y)) / body_length
+        normalized_hip_heights.append(hip_height_norm)
 
     cap.release()
 
-    if len(body_angles) == 0:
+    if len(hip_signed_distances) == 0:
         return None
 
     feat = [
+        np.mean(hip_signed_distances),
+        np.std(hip_signed_distances),
+
+        np.mean(normalized_hip_heights),
+        np.std(normalized_hip_heights),
+
         np.mean(body_angles),
         np.std(body_angles),
-        np.min(body_angles),
-        np.max(body_angles),
-
-        np.mean(torso_slopes),
-        np.std(torso_slopes),
-
-        np.mean(hip_deviations),
-        np.max(hip_deviations),
-
-        np.mean(hip_heights),
-        np.std(hip_heights),
-        np.min(hip_heights),
-        np.max(hip_heights),
     ]
 
     return feat

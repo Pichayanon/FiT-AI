@@ -115,8 +115,8 @@ app.add_middleware(
 @dataclass
 class StreamState:
     started: bool = False
-    # per-frame features: (body_angle, torso_slope, hip_deviation, hip_height)
-    feats: List[Tuple[float, float, float, float]] = field(default_factory=list)
+    # per-frame features: (signed_dist, hip_height_norm, body_angle)
+    feats: List[Tuple[float, float, float]] = field(default_factory=list)
 
     # gate
     ready: bool = False
@@ -315,9 +315,8 @@ class FeatureExtractor:
     """Extract per-frame features used by the plank model.
 
     Returns per-frame tuple:
-        (body_angle, torso_slope, hip_deviation, hip_height)
+        (signed_dist, hip_height_norm, body_angle)
     """
-
     def __init__(self, mp_pose: Any) -> None:
         self.mp_pose = mp_pose
 
@@ -328,7 +327,7 @@ class FeatureExtractor:
         cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
         return np.degrees(np.arccos(np.clip(cos, -1, 1)))
 
-    def extract_features(self, res: Any, side: str) -> Optional[Tuple[float, float, float, float]]:
+    def extract_features(self, res: Any, side: str) -> Optional[Tuple[float, float, float]]:
         if not res.pose_landmarks:
             return None
 
@@ -343,75 +342,44 @@ class FeatureExtractor:
             ankle = self.mp_pose.PoseLandmark.LEFT_ANKLE
             shoulder = self.mp_pose.PoseLandmark.LEFT_SHOULDER
 
-        shoulder_xy = np.array([lm[shoulder].x, lm[shoulder].y], dtype=np.float32)
-        hip_xy = np.array([lm[hip].x, lm[hip].y], dtype=np.float32)
-        ankle_xy = np.array([lm[ankle].x, lm[ankle].y], dtype=np.float32)
+        shoulder_xy = np.array([lm[shoulder].x, lm[shoulder].y])
+        hip_xy = np.array([lm[hip].x, lm[hip].y])
+        ankle_xy = np.array([lm[ankle].x, lm[ankle].y])
 
-        # 1️⃣ Body angle
+        # 1️⃣ Signed distance of hip from shoulder-ankle line
+        line_vec = ankle_xy - shoulder_xy
+        hip_vec = hip_xy - shoulder_xy
+        signed_dist = np.cross(line_vec, hip_vec) / (np.linalg.norm(line_vec) + 1e-6)
+
+        # 2️⃣ Body angle (shoulder-hip-ankle)
         body_angle = self.angle(shoulder_xy, hip_xy, ankle_xy)
 
-        # 2️⃣ Torso slope (y over x)
-        slope = (ankle_xy[1] - shoulder_xy[1]) / (ankle_xy[0] - shoulder_xy[0] + 1e-6)
+        # 3️⃣ Normalized hip height
+        body_length = np.linalg.norm(ankle_xy - shoulder_xy) + 1e-6
+        hip_height_norm = (lm[hip].y - 0.5 * (lm[shoulder].y + lm[ankle].y)) / body_length
 
-        # 3️⃣ Hip deviation from shoulder-ankle line
-        dev = np.abs(
-            np.cross(
-                ankle_xy - shoulder_xy,
-                shoulder_xy - hip_xy,
-            )
-        ) / (np.linalg.norm(ankle_xy - shoulder_xy) + 1e-6)
-
-        # 4️⃣ Relative hip height
-        mean_ref_y = 0.5 * (shoulder_xy[1] + ankle_xy[1])
-        hip_height = hip_xy[1] - mean_ref_y
-
-        return float(body_angle), float(slope), float(dev), float(hip_height)
+        return float(signed_dist), float(hip_height_norm), float(body_angle)
 
     @staticmethod
-    def aggregate_window(vals: List[Tuple[float, float, float, float]]) -> np.ndarray:
+    def aggregate_window(vals: List[Tuple[float, float, float]]) -> np.ndarray:
         """
-        Aggregate window into final feature vector:
-        [
-            mean_body_angle,
-            std_body_angle,
-            min_body_angle,
-            max_body_angle,
-
-            mean_torso_slope,
-            std_torso_slope,
-
-            mean_hip_deviation,
-            max_hip_deviation,
-
-            mean_hip_height,
-            std_hip_height,
-            min_hip_height,
-            max_hip_height,
-        ]
-        This matches the 12-dim feature definition in train_plank.py.
+        Aggregate window into final 6-dim feature vector.
+        This matches the feature definition in train_plank.py.
         """
-        body = [v[0] for v in vals]
-        slope = [v[1] for v in vals]
-        dev = [v[2] for v in vals]
-        hip = [v[3] for v in vals]
+        signed_dists = [v[0] for v in vals]
+        hip_height_norms = [v[1] for v in vals]
+        body_angles = [v[2] for v in vals]
 
         return np.array(
             [
-                np.mean(body),
-                np.std(body),
-                np.min(body),
-                np.max(body),
+                np.mean(signed_dists),
+                np.std(signed_dists),
 
-                np.mean(slope),
-                np.std(slope),
+                np.mean(hip_height_norms),
+                np.std(hip_height_norms),
 
-                np.mean(dev),
-                np.max(dev),
-
-                np.mean(hip),
-                np.std(hip),
-                np.min(hip),
-                np.max(hip),
+                np.mean(body_angles),
+                np.std(body_angles),
             ],
             dtype=np.float32,
         )
