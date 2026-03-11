@@ -29,6 +29,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+import matplotlib.pyplot as plt
 
 
 def _confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int) -> np.ndarray:
@@ -92,6 +93,14 @@ def _print_eval_report(cm: np.ndarray, idx_to_label: Dict[int, str]) -> None:
     for i in range(cm.shape[0]):
         name = idx_to_label.get(int(i), str(i))
         print(f"{name:<22} {int(sup[i]):>7} {prec[i]:>9.3f} {rec[i]:>7.3f} {f1[i]:>7.3f}")
+
+    print("\n[VAL] Per-class Accuracy:")
+    cm_diag = cm.diagonal()
+    cm_sum = cm.sum(axis=1)
+    for i in range(cm.shape[0]):
+        name = idx_to_label.get(int(i), str(i))
+        cls_acc = cm_diag[i] / cm_sum[i] if cm_sum[i] > 0 else 0.0
+        print(f"  {name:<20}: {cls_acc:.4f} ({cm_diag[i]}/{cm_sum[i]})")
 
     print("\n[VAL] Summary:")
     print(f"  accuracy   : {rep['accuracy']:.4f}")
@@ -434,31 +443,65 @@ def train(args: argparse.Namespace) -> None:
     """Train a TCN for squat standing classification."""
     set_seed(args.seed)
 
-    npz_paths = sorted(glob.glob(os.path.join(args.data, "*.npz")))
-    if len(npz_paths) == 0:
-        raise RuntimeError(f"No .npz found in: {args.data}")
+    # Check for explicit train/val/test folders
+    train_dir = os.path.join(args.data, "train")
+    val_dir = os.path.join(args.data, "val")
+    test_dir = os.path.join(args.data, "test")
 
-    labels = infer_labels(npz_paths)
+    # Handle "validation" alias
+    if not os.path.isdir(val_dir) and os.path.isdir(os.path.join(args.data, "validation")):
+        val_dir = os.path.join(args.data, "validation")
+
+    has_subfolders = os.path.isdir(train_dir) and os.path.isdir(val_dir)
+
+    tr_paths: List[str] = []
+    va_paths: List[str] = []
+    te_paths: List[str] = []
+
+    if has_subfolders:
+        print(f"[DATA] Detected subfolders in {args.data}")
+        tr_paths = sorted(glob.glob(os.path.join(train_dir, "*.npz")))
+        va_paths = sorted(glob.glob(os.path.join(val_dir, "*.npz")))
+        if os.path.isdir(test_dir):
+            te_paths = sorted(glob.glob(os.path.join(test_dir, "*.npz")))
+        
+        all_paths = tr_paths + va_paths + te_paths
+        if len(all_paths) == 0:
+            raise RuntimeError(f"No .npz found in subfolders of: {args.data}")
+    else:
+        # Fallback to flat directory + random split
+        print(f"[DATA] No train/val subfolders found. Using random split from {args.data}")
+        all_paths = sorted(glob.glob(os.path.join(args.data, "*.npz")))
+        if len(all_paths) == 0:
+            raise RuntimeError(f"No .npz found in: {args.data}")
+        tr_paths, va_paths = build_splits(all_paths, val_ratio=args.val_ratio, seed=args.seed)
+        # No implicit test set in this mode
+
+    labels = infer_labels(all_paths)
     label_map = make_label_map(labels)
     idx_to_label = {i: name for name, i in label_map.items()}
 
-    print("[DATA] total:", len(npz_paths))
+    print("[DATA] total found:", len(all_paths))
     print("[DATA] labels:", label_map)
     print(f"[FEAT] stand-focused {FEATURE_DIM} dims")
 
-    tr_paths, va_paths = build_splits(npz_paths, val_ratio=args.val_ratio, seed=args.seed)
-    print(f"[SPLIT] train: {len(tr_paths)} | val: {len(va_paths)}")
+    print(f"[SPLIT] train: {len(tr_paths)} | val: {len(va_paths)} | test: {len(te_paths)}")
     print("[SPLIT] train dist:", count_label_dist(tr_paths))
     print("[SPLIT] val   dist:", count_label_dist(va_paths))
+    if te_paths:
+        print("[SPLIT] test  dist:", count_label_dist(te_paths))
 
     tr_samples = [Sample(p, load_npz(p)[2]) for p in tr_paths]
     va_samples = [Sample(p, load_npz(p)[2]) for p in va_paths]
+    te_samples = [Sample(p, load_npz(p)[2]) for p in te_paths]
 
     train_ds = StandingNPZDataset(tr_samples, label_map, T=args.T)
     val_ds = StandingNPZDataset(va_samples, label_map, T=args.T)
+    test_ds = StandingNPZDataset(te_samples, label_map, T=args.T) if te_samples else None
 
     train_loader = DataLoader(train_ds, batch_size=args.bs, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=args.bs, shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_ds, batch_size=args.bs, shuffle=False, num_workers=0) if test_ds else None
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     print("[DEVICE]", device)
@@ -476,6 +519,9 @@ def train(args: argparse.Namespace) -> None:
     best_val_acc = -1.0
     best_state = None
     best_ep = -1
+    
+    # Track history
+    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
 
     for ep in range(1, int(args.epochs) + 1):
         model.train()
@@ -504,6 +550,12 @@ def train(args: argparse.Namespace) -> None:
 
         va_loss, va_acc = evaluate(model, val_loader, device)
 
+        # Record history
+        history["train_loss"].append(tr_loss)
+        history["train_acc"].append(tr_acc)
+        history["val_loss"].append(va_loss)
+        history["val_acc"].append(va_acc)
+
         print(
             f"Epoch {ep:03d}/{args.epochs} | "
             f"train loss={tr_loss:.4f} acc={tr_acc:.3f} | "
@@ -514,22 +566,64 @@ def train(args: argparse.Namespace) -> None:
             best_val_acc = va_acc
             best_ep = ep
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            print(f"  -> best @epoch {ep} val_acc={va_acc:.3f}")
+            print(f"  -> best updated @epoch {best_ep} | best_val_acc={best_val_acc:.3f}")
 
             # Print detailed evaluation for the current best checkpoint.
             _, _, y_t, y_p = evaluate_with_preds(model, val_loader, device)
             cm = _confusion_matrix(y_t, y_p, num_classes=len(label_map))
             _print_eval_report(cm, idx_to_label)
 
-    print(f"\n=== SUMMARY ===")
-    print(f"Best epoch: {best_ep} | Best val acc: {best_val_acc:.4f} ({best_val_acc*100:.2f}%)")
+    print("\n=== SUMMARY ===")
+    print(f"Train samples: {len(tr_paths)}")
+    print(f"Val samples  : {len(va_paths)}")
+    print(f"Best epoch   : {best_ep}")
+    print(f"Best val acc : {best_val_acc:.4f} ({best_val_acc*100:.2f}%)")
+
+    # Plot history
+    try:
+        plt.figure(figsize=(12, 5))
+        
+        plt.subplot(1, 2, 1)
+        plt.plot(history["train_loss"], label="Train Loss")
+        plt.plot(history["val_loss"], label="Val Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title("Loss over Epochs")
+        plt.legend()
+        plt.grid(True)
+        
+        plt.subplot(1, 2, 2)
+        plt.plot(history["train_acc"], label="Train Acc")
+        plt.plot(history["val_acc"], label="Val Acc")
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy")
+        plt.title("Accuracy over Epochs")
+        plt.legend()
+        plt.grid(True)
+        
+        plot_path = args.out.replace(".pt", "_history.png")
+        plt.tight_layout()
+        plt.savefig(plot_path)
+        plt.close()
+        print(f"[PLOT] Saved training history to: {plot_path}")
+    except Exception as e:
+        print(f"[WARN] Could not save plot: {e}")
 
     # Print final report for the (current) best weights if we have them.
     if best_state is not None:
         model.load_state_dict(best_state)
+        print("\n[VAL] Best Validation Evaluation:")
         _, _, y_t, y_p = evaluate_with_preds(model, val_loader, device)
         cm = _confusion_matrix(y_t, y_p, num_classes=len(label_map))
         _print_eval_report(cm, idx_to_label)
+
+        # Evaluate on Test set if available
+        if test_loader is not None:
+            print("\n[TEST] Test Set Evaluation:")
+            test_loss, test_acc, y_t_test, y_p_test = evaluate_with_preds(model, test_loader, device)
+            print(f"  test loss={test_loss:.4f} acc={test_acc:.4f}")
+            cm_test = _confusion_matrix(y_t_test, y_p_test, num_classes=len(label_map))
+            _print_eval_report(cm_test, idx_to_label)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
@@ -555,12 +649,14 @@ def train(args: argparse.Namespace) -> None:
             "dropout": float(args.dropout),
             "seed": int(args.seed),
             "best_val_acc": float(best_val_acc),
+            "best_epoch": int(best_ep),
         },
     }
 
     torch.save(ckpt, args.out)
     print("[SAVE] checkpoint:", args.out)
     print("[SAVE] best_val_acc:", best_val_acc)
+    print("[SAVE] best_epoch:", best_ep)
     print("[SAVE] label_map:", json.dumps(label_map, ensure_ascii=False))
     print("[SAVE] in_dim:", train_ds.in_dim)
 

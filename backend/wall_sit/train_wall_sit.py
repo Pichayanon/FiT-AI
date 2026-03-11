@@ -3,9 +3,12 @@ import mediapipe as mp
 import numpy as np
 import os
 import joblib
+import argparse
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 
 # -----------------------------
 # Config
@@ -112,44 +115,100 @@ def extract_features(video_path):
     return feat
 
 
-# -----------------------------
-# Build Dataset
-# -----------------------------
-X, y = [], []
+def main():
+    parser = argparse.ArgumentParser(description="Train Wall Sit Classification Model")
+    parser.add_argument("--epochs", type=int, default=50, help="Max iterations for Logistic Regression (default: 2000)")
+    args = parser.parse_args()
 
-for label, folder in DATASET.items():
-    folder_path = os.path.join(BASE_DIR, folder)
-    videos = [
-        os.path.join(folder_path, f)
-        for f in os.listdir(folder_path)
-        if f.endswith((".mp4", ".mov"))
-    ]
+    # -----------------------------
+    # Build Dataset
+    # -----------------------------
+    X, y = [], []
 
-    for v in videos:
-        feat = extract_features(v)
-        if feat is not None:
-            X.append(feat)
-            y.append(label)
+    print(f"[DATA] Loading videos from {BASE_DIR}...")
+    for label, folder in DATASET.items():
+        folder_path = os.path.join(BASE_DIR, folder)
+        if not os.path.isdir(folder_path):
+            print(f"  [WARN] Folder not found: {folder_path}")
+            continue
+            
+        videos = [
+            os.path.join(folder_path, f)
+            for f in os.listdir(folder_path)
+            if f.endswith((".mp4", ".MOV", ".mov"))
+        ]
 
-X = np.array(X)
-y = np.array(y)
+        for v in videos:
+            feat = extract_features(v)
+            if feat is not None:
+                X.append(feat)
+                y.append(label)
 
-print("Dataset shape:", X.shape)
-print("Classes:", np.unique(y))
+    X = np.array(X)
+    y = np.array(y)
 
-# -----------------------------
-# Train model
-# -----------------------------
-model = Pipeline([
-    ("scaler", StandardScaler()),
-    ("clf", LogisticRegression(
-        multi_class="multinomial",
-        solver="lbfgs",
-        max_iter=2000
-    ))
-])
+    print("Dataset shape:", X.shape)
+    print("Classes:", np.unique(y))
 
-model.fit(X, y)
+    # -----------------------------
+    # Train model
+    # -----------------------------
+    # Split into Train/Val
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.3, random_state=921, stratify=y
+    )
 
-joblib.dump(model, "wall_sit_model.pkl")
-print("Model saved: wall_sit_model.pkl")
+    print(f"[SPLIT] Train: {len(X_train)} | Val: {len(X_val)}")
+
+    model = Pipeline([
+        ("scaler", StandardScaler()),
+        ("clf", LogisticRegression(
+            multi_class="multinomial",
+            solver="lbfgs",
+            max_iter=args.epochs
+        ))
+    ])
+
+    print(f"[TRAIN] Fitting model on {len(X_train)} samples with max_iter={args.epochs}...")
+    model.fit(X_train, y_train)
+
+    # Calculate Train Accuracy
+    y_train_pred = model.predict(X_train)
+    train_acc = accuracy_score(y_train, y_train_pred)
+    print(f"[TRAIN] Accuracy: {train_acc:.4f}")
+
+    # Evaluation
+    print("\n[VAL] Evaluating on validation set...")
+    y_pred = model.predict(X_val)
+    acc = accuracy_score(y_val, y_pred)
+    cm = confusion_matrix(y_val, y_pred)
+
+    # Map labels to names for report
+    unique_labels = sorted(np.unique(y))
+    target_names = [DATASET[i] for i in unique_labels]
+
+    print("\n[VAL] Confusion matrix (rows=true, cols=pred):")
+    print(cm)
+
+    print("\n[VAL] Classification Report:")
+    print(classification_report(y_val, y_pred, target_names=target_names, digits=3))
+
+    print("\n[VAL] Per-class Accuracy:")
+    # Calculate per-class accuracy (Recall)
+    cm_diag = cm.diagonal()
+    cm_sum = cm.sum(axis=1)
+    
+    for i, label_idx in enumerate(unique_labels):
+        class_name = DATASET[label_idx]
+        # Avoid division by zero
+        cls_acc = cm_diag[i] / cm_sum[i] if cm_sum[i] > 0 else 0.0
+        print(f"  {class_name:<20}: {cls_acc:.4f} ({cm_diag[i]}/{cm_sum[i]})")
+
+    print(f"\n[VAL] Overall Accuracy: {acc:.4f}")
+
+    joblib.dump(model, "wall_sit_model.pkl")
+    print("Model saved: wall_sit_model.pkl")
+
+
+if __name__ == "__main__":
+    main()

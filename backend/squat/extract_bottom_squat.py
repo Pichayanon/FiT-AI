@@ -115,7 +115,7 @@ class KneeMinimaDetector:
     :param min_gap: minimum frames between detections
     """
 
-    def __init__(self, ema_alpha: float = 0.3, max_bottom_deg: float = 140.0, min_gap: int = 18):
+    def __init__(self, ema_alpha: float = 0.3, max_bottom_deg: float = 150.0, min_gap: int = 18):
         self.ema_alpha = float(ema_alpha)
         self.max_bottom_deg = float(max_bottom_deg)
         self.min_gap = int(min_gap)
