@@ -1,5 +1,8 @@
 import Foundation
 
+// MARK: - Date Formatters
+
+/// Thread-safe, lazily-initialized date formatters shared across workout models.
 private enum WorkoutDateFormatters {
     static let historyDate: DateFormatter = {
         let formatter = DateFormatter()
@@ -15,27 +18,26 @@ private enum WorkoutDateFormatters {
     }()
 }
 
-// MARK: - Progress / Summary models
+// MARK: - Workout Session Mode
 
+/// Identifies the type of exercise being performed in a workout session.
 enum WorkoutSessionMode: String {
     case wallSit
     case squat
     case plank
     case lunges
 
+    /// Human-readable display name for UI presentation.
     var displayName: String {
         switch self {
-        case .wallSit:
-            return "Wall-Sit"
-        case .squat:
-            return "Squat"
-        case .plank:
-            return "Plank"
-        case .lunges:
-            return "Lunges"
+        case .wallSit: return "Wall-Sit"
+        case .squat:   return "Squat"
+        case .plank:   return "Plank"
+        case .lunges:  return "Lunges"
         }
     }
 
+    /// Spoken instruction text read aloud via TTS when the exercise begins.
     var demoInstructionText: String {
         switch self {
         case .wallSit:
@@ -50,6 +52,9 @@ enum WorkoutSessionMode: String {
     }
 }
 
+// MARK: - Workout Program Definition
+
+/// Defines a workout program consisting of one or more exercises.
 struct WorkoutProgramDefinition: Identifiable {
     let id = UUID()
     let title: String
@@ -59,6 +64,9 @@ struct WorkoutProgramDefinition: Identifiable {
     let initialMode: WorkoutSessionMode
 }
 
+// MARK: - Workout Catalog
+
+/// Static catalog of all available workout programs.
 enum WorkoutCatalog {
     static let beginnerLevel1 = WorkoutProgramDefinition(
         title: "Beginner Level 1",
@@ -98,12 +106,17 @@ enum WorkoutCatalog {
         beginnerLevel3,
     ]
 
+    /// Looks up a program by title; falls back to `beginnerLevel1` if not found.
     static func program(for title: String) -> WorkoutProgramDefinition {
         programs.first(where: { $0.title == title }) ?? beginnerLevel1
     }
 }
 
+// MARK: - Text Formatting Utilities
+
+/// Shared text formatting helpers for workout durations and dates.
 enum WorkoutTextFormatter {
+    /// Formats total seconds into "X min Y sec" string.
     static func minuteSecondString(
         for totalSeconds: Int,
         secondSuffix: String = "sec"
@@ -111,10 +124,12 @@ enum WorkoutTextFormatter {
         "\(totalSeconds / 60) min \(totalSeconds % 60) \(secondSuffix)"
     }
 
+    /// Formats a date using medium date and short time style.
     static func historyDateString(for date: Date) -> String {
         WorkoutDateFormatters.historyDate.string(from: date)
     }
 
+    /// Returns "Today", "Yesterday", or a weekday/date string for the given date.
     static func relativeHistoryDateString(for date: Date) -> String {
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return "Today" }
@@ -123,12 +138,16 @@ enum WorkoutTextFormatter {
     }
 }
 
+// MARK: - Progress / Summary Display Models
+
+/// Represents daily calorie data for the weekly chart.
 struct DailyCalorie: Identifiable {
     let id = UUID()
     let date: Date
     let calories: Int
 }
 
+/// Aggregate summary of one workout set (e.g., "Beginner Level 1 — completed 3 times").
 struct WorkoutSetSummary: Identifiable {
     let id = UUID()
     let name: String
@@ -136,8 +155,9 @@ struct WorkoutSetSummary: Identifiable {
     let totalCalories: Int
 }
 
-// MARK: - Workout detail models
+// MARK: - Workout Exercise
 
+/// A single exercise within a workout program (used in the detail/preview screen).
 struct WorkoutExercise: Identifiable {
     let id = UUID()
     let name: String
@@ -145,16 +165,16 @@ struct WorkoutExercise: Identifiable {
     let reps: String
 }
 
-// MARK: - Workout result summary (หลังจบ session: wall-sit + squat)
+// MARK: - Workout Result Summary
 
-/// ข้อผิดพลาดอย่างหนึ่งกับจำนวนครั้ง
+/// A single type of error with its occurrence count.
 struct ErrorCount: Identifiable {
     let id = UUID()
     let reason: String
     let count: Int
 }
 
-/// เหตุการณ์ที่ผิดในแต่ละท่า (บอกเวลาที่ผิด + ผิดอะไร)
+/// A timestamped mistake event during a workout (optionally tied to a rep number).
 struct MistakeEvent: Identifiable {
     let id = UUID()
     let atSecond: Int
@@ -162,7 +182,9 @@ struct MistakeEvent: Identifiable {
     let repNumber: Int?
 }
 
-/// รายการสรุปของท่าออกกำลังกายหนึ่งท่า
+/// Summary for one exercise within a session result.
+/// `.movement` is for rep-based exercises (squat, lunges);
+/// `.isometric` is for hold-based exercises (wall-sit, plank).
 enum ExerciseSummaryItem: Identifiable {
     case movement(
         name: String,
@@ -196,25 +218,29 @@ enum ExerciseSummaryItem: Identifiable {
     }
 }
 
+/// Complete summary of a workout session, including all exercise items and totals.
 struct SessionSummary {
     let items: [ExerciseSummaryItem]
     let totalTimeSeconds: Int
     let estimatedCalories: Int
 }
 
-// MARK: - Firestore workout history (Codable for saving)
+// MARK: - Firestore Workout History (Codable for persistence)
 
+/// Codable error record for Firestore serialization.
 struct ErrorCountRecord: Codable {
     let reason: String
     let count: Int
 }
 
+/// Codable mistake event record for Firestore serialization.
 struct MistakeEventRecord: Codable {
     let atSecond: Int
     let reason: String
     let repNumber: Int?
 }
 
+/// Codable record for one exercise within a saved session.
 struct ExerciseRecord: Codable {
     let name: String
     let type: String // "movement" | "isometric"
@@ -228,6 +254,7 @@ struct ExerciseRecord: Codable {
     let mistakes: [MistakeEventRecord]
 }
 
+/// Codable record for an entire workout session saved to Firestore.
 struct WorkoutSessionRecord: Codable {
     let userId: String
     let setTitle: String
@@ -237,7 +264,10 @@ struct WorkoutSessionRecord: Codable {
     let exercises: [ExerciseRecord]
 }
 
+// MARK: - WorkoutSessionRecord Firestore Deserialization
+
 extension WorkoutSessionRecord {
+    /// Failable initializer that parses a raw Firestore document dictionary.
     init?(from data: [String: Any]) {
         guard let userId = data["userId"] as? String,
               let setTitle = data["setTitle"] as? String,
@@ -249,7 +279,10 @@ extension WorkoutSessionRecord {
     }
 }
 
+// MARK: - ExerciseRecord Firestore Deserialization
+
 extension ExerciseRecord {
+    /// Failable initializer that parses a raw Firestore exercise dictionary.
     init?(from data: [String: Any]) {
         guard let name = data["name"] as? String, let type = data["type"] as? String else { return nil }
         let errors: [ErrorCountRecord] = (data["errors"] as? [[String: Any]])?
@@ -276,7 +309,9 @@ extension ExerciseRecord {
     }
 }
 
-/// One row for Progress History (from Firestore).
+// MARK: - Workout History Item
+
+/// One row in the Progress History list, combining a Firestore document ID with display data.
 struct WorkoutHistoryItem: Identifiable {
     let id: String
     let setTitle: String
@@ -301,8 +336,10 @@ struct WorkoutHistoryItem: Identifiable {
     }
 }
 
+// MARK: - SessionSummary to Firestore Conversion
+
 extension SessionSummary {
-    /// Convert to Firestore-serializable record (caller provides userId and setTitle).
+    /// Converts this summary to a Firestore-serializable record.
     func toRecord(userId: String, setTitle: String) -> WorkoutSessionRecord {
         let exercises: [ExerciseRecord] = items.map { item in
             switch item {

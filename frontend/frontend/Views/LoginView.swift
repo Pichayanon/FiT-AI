@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Login screen with Google Sign-In (and future Apple Sign-In support).
 struct LoginView: View {
     @StateObject private var viewModel: LoginViewModel
 
@@ -30,7 +31,7 @@ struct LoginView: View {
 
                 VStack(spacing: 16) {
                     if viewModel.auth.isLoading {
-                        ProgressView()
+                        SwiftUI.ProgressView()
                             .progressViewStyle(CircularProgressViewStyle(tint: .white))
                             .scaleEffect(1.2)
                             .padding()

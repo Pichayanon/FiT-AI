@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 
+/// Provides workout program data for the workout detail/preview screen.
 @MainActor
 final class WorkoutDetailViewModel: ObservableObject {
     let program: WorkoutProgramDefinition

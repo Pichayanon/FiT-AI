@@ -1,32 +1,187 @@
 import Foundation
 import SwiftUI
 
-/// Coordinates workout session state, backend messaging, and summary generation.
+// MARK: - Exercise Error Tracker
+
+/// Tracks per-exercise error counts and mistake events with deduplication.
+///
+/// Only records a new error when the prediction transitions from correct to incorrect,
+/// preventing the same sustained error from being counted on every backend message.
+struct ExerciseErrorTracker {
+    var errorCounts: [String: Int] = [:]
+    var mistakeEvents: [MistakeEvent] = []
+    var lastPredictionWasCorrect: Bool = true
+
+    /// Records an error if transitioning from correct to incorrect.
+    /// Only increments the count on the first incorrect prediction after a correct one.
+    mutating func recordMistakeIfTransitioned(
+        prediction: String,
+        elapsedSeconds: Int,
+        repNumber: Int?,
+        displayLabel: String
+    ) {
+        if lastPredictionWasCorrect {
+            errorCounts[prediction] = (errorCounts[prediction] ?? 0) + 1
+            mistakeEvents.append(
+                MistakeEvent(
+                    atSecond: elapsedSeconds,
+                    reason: displayLabel,
+                    repNumber: repNumber
+                )
+            )
+        }
+        lastPredictionWasCorrect = false
+    }
+
+    /// Marks the current state as correct (resets the transition guard).
+    mutating func markPredictionAsCorrect() {
+        lastPredictionWasCorrect = true
+    }
+
+    /// Resets all tracking state.
+    mutating func reset() {
+        errorCounts = [:]
+        mistakeEvents = []
+        lastPredictionWasCorrect = true
+    }
+}
+
+// MARK: - Isometric Hold State
+
+/// Shared state machine for isometric hold exercises (wall-sit, plank).
+///
+/// Two-phase progression:
+/// 1. Gate phase — accumulate 3 consecutive correct predictions to prove stable form.
+/// 2. Hold phase — count elapsed hold time until the target is reached.
+///
+/// Dropping out of correct form at any point resets the entire progression.
+struct IsometricHoldState {
+    var consecutiveCorrectCount: Int = 0
+    var isCountingActive: Bool = false
+    var isCurrentlyCorrect: Bool = false
+    var elapsedSeconds: Double = 0
+    var targetSeconds: Double = 5.0
+    var hasPassed: Bool = false
+
+    /// Progress from 0 to 1 for UI display.
+    var progress: Double {
+        guard targetSeconds > 0 else { return 0 }
+        return min(1.0, max(0.0, elapsedSeconds / targetSeconds))
+    }
+
+    /// Called by a 0.1s timer tick while hold is active.
+    /// Returns true if the target was just reached.
+    mutating func updateHoldTime(interval: Double) -> Bool {
+        guard isCountingActive, !hasPassed, isCurrentlyCorrect else { return false }
+        elapsedSeconds = min(targetSeconds, elapsedSeconds + interval)
+        if elapsedSeconds >= targetSeconds {
+            elapsedSeconds = targetSeconds
+            hasPassed = true
+            return true
+        }
+        return false
+    }
+
+    /// Possible actions returned by `handleResult`.
+    enum Action {
+        case none
+        case firstCorrectInStreak
+        case gatePassed(feedbackText: String)
+        case holdingProgress(feedbackText: String)
+        case lostForm(feedbackText: String)
+    }
+
+    /// Processes a backend prediction result and returns the appropriate UI action.
+    mutating func processIsometricPrediction(isCorrect: Bool, incorrectFeedback: String, exerciseName: String) -> Action {
+        isCurrentlyCorrect = isCorrect
+
+        if hasPassed { return .none }
+
+        // Phase 1: Gate — require 3 consecutive correct predictions
+        if !isCountingActive {
+            if isCorrect {
+                consecutiveCorrectCount = min(3, consecutiveCorrectCount + 1)
+                if consecutiveCorrectCount == 1 {
+                    return .firstCorrectInStreak
+                }
+                if consecutiveCorrectCount >= 3 {
+                    isCountingActive = true
+                    elapsedSeconds = 0
+                    targetSeconds = 5.0
+                    return .gatePassed(feedbackText: "Start hold...")
+                }
+                return .holdingProgress(feedbackText: "Correct \(consecutiveCorrectCount)/3 - Keep holding")
+            } else {
+                if consecutiveCorrectCount != 0 {
+                    consecutiveCorrectCount = 0
+                    return .lostForm(feedbackText: incorrectFeedback)
+                }
+                return .none
+            }
+        }
+
+        // Phase 2: Hold — counting down the target seconds
+        if !isCorrect {
+            isCountingActive = false
+            isCurrentlyCorrect = false
+            consecutiveCorrectCount = 0
+            elapsedSeconds = 0
+            return .lostForm(feedbackText: incorrectFeedback)
+        }
+
+        return .none
+    }
+
+    /// Resets all hold state to initial values.
+    mutating func reset() {
+        consecutiveCorrectCount = 0
+        isCountingActive = false
+        isCurrentlyCorrect = false
+        elapsedSeconds = 0
+        targetSeconds = 5.0
+        hasPassed = false
+    }
+}
+
+// MARK: - Workout Session View Model
+
+/// Coordinates workout session state, camera/backend messaging, speech feedback,
+/// exercise progression, and session summary generation.
+///
+/// Supports four exercise types across two categories:
+/// - Isometric (wall-sit, plank): 3-correct gate then timed hold
+/// - Movement (squat, lunges): rep counting with error tracking
+///
+/// Multi-exercise programs progress automatically (e.g., wall-sit -> squat -> plank)
+/// with preview countdowns between transitions.
 @MainActor
 final class WorkoutSessionViewModel: ObservableObject {
-    // ✅ Backend phases (match Python)
+
+    /// Backend processing phases (matched to Python server).
     private enum BackendPhase: String {
         case NO_POSE, HAVE_POSE, BUFFERING, INFERENCING
     }
 
     // MARK: - Dependencies
-    @Published var cameraManager = CameraManager()
-    let speech = SpeechManager()
+
+    @Published var cameraManager = CameraService()
+    let speech = SpeechService()
     private let workoutHistory = WorkoutHistoryService()
 
     // MARK: - Inputs
+
     let setTitle: String
     private let program: WorkoutProgramDefinition
 
-    // MARK: - Published States (ย้ายมาจาก View เดิม)
-    @Published var feedback: String = "Side view • Stand → Lower → Hold"
+    // MARK: - Published UI State
+
+    @Published var feedback: String = "Side view - Stand -> Lower -> Hold"
     @Published var totalReps = 0
     @Published var correctReps = 0
     @Published var incorrectReps = 0
     @Published var startTime = Date()
     @Published var navigateToResult = false
     @Published var isSessionRunning = false
-
     @Published var backendState: String = BackendPhase.NO_POSE.rawValue
 
     // Squat speech control
@@ -34,84 +189,49 @@ final class WorkoutSessionViewModel: ObservableObject {
     @Published var squatStarted: Bool = false
     @Published var lastStandOKAt: Date?
     @Published var lastPleaseStartAt: Date = .distantPast
-
     @Published var lastSpokenCorrectReps: Int = 0
 
-    // Wall-sit hold progress
-    @Published var correctSeconds: Double = 0
-    @Published var targetSeconds: Double = 5.0
+    // Isometric hold state (wall-sit)
+    @Published var wallSitHold = IsometricHoldState()
     @Published var passedWallSit: Bool = false
 
-    // Gate: ต้อง correct 3 ครั้งติด
-    @Published var wallSitConsecutiveCorrect: Int = 0
-    @Published var wallSitCountingActive: Bool = false
-    @Published var wallSitIsCorrectHold: Bool = false
-
-    // Plank hold progress
-    @Published var plankCorrectSeconds: Double = 0
-    @Published var plankTargetSeconds: Double = 5.0
+    // Isometric hold state (plank)
+    @Published var plankHold = IsometricHoldState()
     @Published var passedPlank: Bool = false
 
-    // Gate: ต้อง correct 3 ครั้งติด (สำหรับ Plank)
-    @Published var plankConsecutiveCorrect: Int = 0
-    @Published var plankCountingActive: Bool = false
-    @Published var plankIsCorrectHold: Bool = false
-
-    // Squat preview
+    // Exercise preview overlays
     @Published var showSquatPreview: Bool = false
     @Published var squatPreviewSeconds: Int = 8
-
-    // Plank preview (before performing plank, after squat)
     @Published var showPlankPreview: Bool = false
     @Published var plankPreviewSeconds: Int = 8
 
-    // Auto switch control
+    // Auto-switch guards (prevent double-switching)
     @Published var didSwitchToSquat: Bool = false
     @Published var didSwitchToPlank: Bool = false
 
-    // Squat target: correct 3 reps = finish
+    // Target reps for movement exercises
     @Published var squatTargetCorrectReps: Int = 3
-
-    // Lunges target
     @Published var lungesTargetCorrectReps: Int = 3
 
-    // Current mode (sequence: wall-sit → squat → plank)
+    // Current exercise mode
     @Published var mode: WorkoutSessionMode = .wallSit
 
-    /// สรุป session สำหรับส่งไปหน้า result (เซ็ตตอน finishSession)
+    /// Session summary populated when the session finishes; drives the result screen.
     @Published var sessionSummary: SessionSummary = SessionSummary(items: [], totalTimeSeconds: 0, estimatedCalories: 0)
 
-    /// นับจำนวนครั้งที่ผิดแต่ละประเภทใน wall-sit (label จาก backend → count)
-    private var wallSitErrorCounts: [String: Int] = [:]
-    /// ไทม์ไลน์ว่าผิดตอนไหน + ผิดอะไร
-    private var wallSitMistakeEvents: [MistakeEvent] = []
-    /// ใช้ dedupe: นับ error แค่ตอนเปลี่ยนจาก correct → error (ไม่นับทุก message)
-    private var lastWallSitPredWasCorrect: Bool = true
+    // MARK: - Error Trackers (per-exercise)
 
-    /// นับจำนวนครั้งที่ผิดแต่ละประเภทใน squat (label จาก backend → count)
-    private var squatErrorCounts: [String: Int] = [:]
-    /// ไทม์ไลน์ว่าผิดตอนไหน + ผิดอะไร
-    private var squatMistakeEvents: [MistakeEvent] = []
-    /// ใช้ dedupe: นับ error แค่ตอนเปลี่ยนจาก correct → error
-    private var lastSquatPredWasCorrect: Bool = true
-
-    /// นับจำนวนครั้งที่ผิดแต่ละประเภทใน plank (label จาก backend → count)
-    private var plankErrorCounts: [String: Int] = [:]
-    /// ไทม์ไลน์ว่าผิดตอนไหน + ผิดอะไร
-    private var plankMistakeEvents: [MistakeEvent] = []
-    /// ใช้ dedupe: นับ error แค่ตอนเปลี่ยนจาก correct → error (ไม่นับทุก message)
-    private var lastPlankPredWasCorrect: Bool = true
-
-    // Lunges stats
-    private var lungesErrorCounts: [String: Int] = [:]
-    private var lungesMistakeEvents: [MistakeEvent] = []
-    private var lastLungesPredWasCorrect: Bool = true
+    private var wallSitErrors = ExerciseErrorTracker()
+    private var squatErrors = ExerciseErrorTracker()
+    private var plankErrors = ExerciseErrorTracker()
+    private var lungesErrors = ExerciseErrorTracker()
 
     // MARK: - Constants
+
     private let speechLang = "en-US"
     private let previewDurationSeconds = 8
 
-    // WS endpoints
+    // WebSocket endpoints (one per exercise backend)
     private let wsWallSitURL = "ws://172.20.10.5:5050/ws/video"
     private let wsSquatURL   = "ws://172.20.10.5:5051/ws/video"
     private let wsPlankURL   = "ws://172.20.10.5:5052/ws/video"
@@ -121,6 +241,7 @@ final class WorkoutSessionViewModel: ObservableObject {
         program.initialMode
     }
 
+    /// Returns the WebSocket URL for the currently active exercise mode.
     private var activeWSURL: String {
         switch mode {
         case .wallSit: return wsWallSitURL
@@ -130,37 +251,48 @@ final class WorkoutSessionViewModel: ObservableObject {
         }
     }
 
-    // ปรับ threshold ตามโมเดลจริงของคุณ
+    // Confidence thresholds for isometric classification
     private let wallSitConfThreshold: Double = 0.50
     private let plankConfThreshold: Double = 0.50
 
-    // เปิด/ปิดปุ่มทดสอบเสียง (ถ้าจะใช้ใน View ให้ expose เพิ่ม)
+    // Debug: toggle the test voice button in the UI
     let showTestVoiceButton: Bool = false
 
-    // MARK: - Derived
-    var wallSitProgress01: Double {
-        guard targetSeconds > 0 else { return 0 }
-        return min(1.0, max(0.0, correctSeconds / targetSeconds))
-    }
+    // MARK: - Computed Properties
 
+    /// Wall-sit hold progress (0...1) for the progress bar.
+    var wallSitProgress01: Double { wallSitHold.progress }
+
+    /// Squat rep progress (0...1) for the progress bar.
     var squatProgress01: Double {
         let tgt = Double(max(1, squatTargetCorrectReps))
         return min(1.0, max(0.0, Double(correctReps) / tgt))
     }
 
-    var plankProgress01: Double {
-        guard plankTargetSeconds > 0 else { return 0 }
-        return min(1.0, max(0.0, plankCorrectSeconds / plankTargetSeconds))
-    }
+    /// Plank hold progress (0...1) for the progress bar.
+    var plankProgress01: Double { plankHold.progress }
 
+    /// Lunges rep progress (0...1) for the progress bar.
     var lungesProgress01: Double {
         let tgt = Double(max(1, lungesTargetCorrectReps))
         return min(1.0, max(0.0, Double(correctReps) / tgt))
     }
 
+    /// Convenience accessors so the View can read hold state without reaching into the struct.
+    var correctSeconds: Double { wallSitHold.elapsedSeconds }
+    var targetSeconds: Double { wallSitHold.targetSeconds }
+    var wallSitConsecutiveCorrect: Int { wallSitHold.consecutiveCorrectCount }
+    var wallSitCountingActive: Bool { wallSitHold.isCountingActive }
+
+    var plankCorrectSeconds: Double { plankHold.elapsedSeconds }
+    var plankTargetSeconds: Double { plankHold.targetSeconds }
+
+    /// Title shown in the top HUD (set name + current exercise).
     var titleForHUD: String {
-        "\(setTitle) • \(mode.displayName)"
+        "\(setTitle) - \(mode.displayName)"
     }
+
+    // MARK: - Initialization
 
     init(setTitle: String) {
         let program = WorkoutCatalog.program(for: setTitle)
@@ -169,21 +301,26 @@ final class WorkoutSessionViewModel: ObservableObject {
         self.mode = program.initialMode
     }
 
-    // MARK: - Lifecycle
+    // MARK: - View Lifecycle
+
+    /// Called when the session view appears. Starts camera and registers backend message handler.
     func onAppear() {
         speech.configureAudioSession()
         cameraManager.startSession()
         cameraManager.onBackendMessage = { [weak self] text in
-            self?.handleBackendMessage(text)
+            self?.processBackendMessage(text)
         }
     }
 
+    /// Called when the session view disappears. Stops session and camera.
     func onDisappear() {
         stopSession()
         cameraManager.stopSession()
     }
 
     // MARK: - Session Control
+
+    /// Starts the workout session: connects to the backend, resets counters, begins streaming.
     func startSession() {
         withAnimation(.easeInOut(duration: 0.2)) {
             isSessionRunning = true
@@ -200,6 +337,7 @@ final class WorkoutSessionViewModel: ObservableObject {
         scheduleDemoInstructionIfNeeded(for: mode)
     }
 
+    /// Stops the workout session: disconnects streaming, resets backend state, stops speech.
     func stopSession() {
         isSessionRunning = false
         cameraManager.stopStreaming()
@@ -207,7 +345,7 @@ final class WorkoutSessionViewModel: ObservableObject {
         speech.stop()
     }
 
-    /// Reset all session-scoped counters before connecting to a workout backend.
+    /// Resets all session-scoped counters and state before connecting to a workout backend.
     private func resetSessionState() {
         mode = initialMode
 
@@ -225,17 +363,8 @@ final class WorkoutSessionViewModel: ObservableObject {
         incorrectReps = 0
         lastSpokenCorrectReps = 0
 
-        correctSeconds = 0
-        targetSeconds = 5.0
-        wallSitConsecutiveCorrect = 0
-        wallSitCountingActive = false
-        wallSitIsCorrectHold = false
-
-        plankCorrectSeconds = 0
-        plankTargetSeconds = 5.0
-        plankConsecutiveCorrect = 0
-        plankCountingActive = false
-        plankIsCorrectHold = false
+        wallSitHold.reset()
+        plankHold.reset()
         passedPlank = false
 
         squatStandOK = false
@@ -243,22 +372,14 @@ final class WorkoutSessionViewModel: ObservableObject {
         lastStandOKAt = nil
         lastPleaseStartAt = .distantPast
 
-        lungesErrorCounts = [:]
-        lungesMistakeEvents = []
-        lastLungesPredWasCorrect = true
-
-        wallSitErrorCounts = [:]
-        wallSitMistakeEvents = []
-        squatErrorCounts = [:]
-        squatMistakeEvents = []
-        plankErrorCounts = [:]
-        plankMistakeEvents = []
-        lastWallSitPredWasCorrect = true
-        lastSquatPredWasCorrect = true
-        lastPlankPredWasCorrect = true
+        wallSitErrors.reset()
+        squatErrors.reset()
+        plankErrors.reset()
+        lungesErrors.reset()
     }
 
-    /// Speak the exercise setup instructions once after the stream begins.
+    /// Speaks the exercise setup instructions once after the stream begins.
+    /// Skipped for squat since it has its own stand-check flow.
     private func scheduleDemoInstructionIfNeeded(for mode: WorkoutSessionMode) {
         guard mode != .squat else { return }
 
@@ -275,6 +396,7 @@ final class WorkoutSessionViewModel: ObservableObject {
         }
     }
 
+    /// Finishes the workout session: stops streaming, builds summary, saves to history, navigates to results.
     func finishSession() {
         stopSession()
         speech.speak("Session complete", language: speechLang, minInterval: 0)
@@ -283,123 +405,29 @@ final class WorkoutSessionViewModel: ObservableObject {
         navigateToResult = true
     }
 
-    /// Map backend label to display text (English); removes underscores and title-cases.
-    private static func displayLabel(for backendLabel: String) -> String {
-        let p = backendLabel.lowercased()
-        if p.contains("feet_too_close") || p.contains("feet too close") { return "Feet too close" }
-        if p.contains("knee_ins") || p.contains("knees_in") || p.contains("knees in") { return "Knees in" }
-        if p.contains("round_back") { return "Round back" }
-        if p.contains("torso_lean_forward") || p.contains("torso lean forward") { return "Torso lean forward" }
-        if p.contains("knee_over_toe") || p.contains("knee over toe") { return "Knee over toe" }
-        if p.contains("not_deep_enough") { return "Not deep enough" }
-        if p.contains("stand_too_narrow") { return "Stand too narrow" }
-        if p.contains("stand_too_wide") { return "Stand too wide" }
-        // Replace underscores with spaces and capitalize each word (e.g. hips_too_high → Hips Too High)
-        let withSpaces = backendLabel.replacingOccurrences(of: "_", with: " ")
-        guard !withSpaces.isEmpty else { return backendLabel }
-        return withSpaces.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst().lowercased() }.joined(separator: " ")
-    }
+    // MARK: - Timer Handlers
 
-    private func buildSessionSummary() -> SessionSummary {
-        let totalTime = Int(Date().timeIntervalSince(startTime))
-        var calories = max(0, correctReps) * 4
-        if initialMode == .plank {
-            calories = Int(plankCorrectSeconds * 0.5)
-        }
-
-        var items: [ExerciseSummaryItem] = []
-
-        if initialMode == .plank {
-            items.append(.isometric(
-                name: "Plank",
-                durationSeconds: plankCorrectSeconds,
-                targetSeconds: plankTargetSeconds,
-                errors: buildErrorCounts(from: plankErrorCounts),
-                mistakes: plankMistakeEvents
-            ))
-        } else if initialMode == .lunges {
-            items.append(.movement(
-                name: "Lunges",
-                totalReps: totalReps,
-                correctReps: correctReps,
-                incorrectReps: incorrectReps,
-                targetCorrectReps: lungesTargetCorrectReps,
-                errors: buildErrorCounts(from: lungesErrorCounts),
-                mistakes: lungesMistakeEvents
-            ))
-        } else {
-            items.append(.isometric(
-                name: "Wall-Sit",
-                durationSeconds: correctSeconds,
-                targetSeconds: targetSeconds,
-                errors: buildErrorCounts(from: wallSitErrorCounts),
-                mistakes: wallSitMistakeEvents
-            ))
-
-            items.append(.movement(
-                name: "Squat",
-                totalReps: totalReps,
-                correctReps: correctReps,
-                incorrectReps: incorrectReps,
-                targetCorrectReps: squatTargetCorrectReps,
-                errors: buildErrorCounts(from: squatErrorCounts),
-                mistakes: squatMistakeEvents
-            ))
-
-            items.append(.isometric(
-                name: "Plank",
-                durationSeconds: plankCorrectSeconds,
-                targetSeconds: plankTargetSeconds,
-                errors: buildErrorCounts(from: plankErrorCounts),
-                mistakes: plankMistakeEvents
-            ))
-        }
-
-        return SessionSummary(items: items, totalTimeSeconds: totalTime, estimatedCalories: calories)
-    }
-
-    private func buildErrorCounts(from counts: [String: Int]) -> [ErrorCount] {
-        counts
-            .filter { $0.value > 0 }
-            .map { ErrorCount(reason: Self.displayLabel(for: $0.key), count: $0.value) }
-            .sorted { $0.count > $1.count }
-    }
-
-    // MARK: - Timers
+    /// Called every 0.1s by the wall-sit timer. Increments hold time if conditions are met.
     func handleWallSitTick() {
-        guard isSessionRunning else { return }
-        guard mode == .wallSit else { return }
-        guard wallSitCountingActive else { return }
-        guard !passedWallSit else { return }
-        guard wallSitIsCorrectHold else { return }
-        guard !showSquatPreview else { return } // ขึ้น preview แล้วไม่ต้องนับต่อ
-
-        correctSeconds = min(targetSeconds, correctSeconds + 0.1)
-
-        if correctSeconds >= targetSeconds {
-            correctSeconds = targetSeconds
+        guard isSessionRunning, mode == .wallSit, !passedWallSit, !showSquatPreview else { return }
+        let justPassed = wallSitHold.updateHoldTime(interval: 0.1)
+        if justPassed {
             passedWallSit = true
-            setFeedbackIfChanged("Passed ✅")
+            setFeedbackIfChanged("Passed")
             speech.speak("Wall-sit complete. Switch to Squat.", language: speechLang, minInterval: 0)
-
-            // ✅ หยุด stream ระหว่าง preview กันมัน detect ต่อ
+            // Stop streaming during preview to prevent stale detections
             cameraManager.stopStreaming()
-
-            startSquatPreviewThenSwitch()
+            beginTransitionCountdown(for: .squat)
         }
     }
 
+    /// Called every 0.5s to check if the user has been idle too long after squat stand OK.
     func handleSquatIdleTick() {
-        guard isSessionRunning else { return }
-        guard mode == .squat else { return }
-        guard squatStandOK else { return }
-        guard !squatStarted else { return }
-
+        guard isSessionRunning, mode == .squat, squatStandOK, !squatStarted else { return }
         guard let okAt = lastStandOKAt else { return }
 
-        // รอ 30 วิ หลัง Stand OK
+        // Remind the user after 30 seconds of inactivity post stand-OK
         if Date().timeIntervalSince(okAt) > 30.0 {
-            // กันพูดรัว (พูดทุก ~15 วิ)
             if Date().timeIntervalSince(lastPleaseStartAt) > 15.0 {
                 speech.speak("Please start squat", language: speechLang, minInterval: 0)
                 lastPleaseStartAt = Date()
@@ -407,7 +435,20 @@ final class WorkoutSessionViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Feedback speech
+    /// Called every 0.1s by the plank timer. Increments hold time if conditions are met.
+    func handlePlankTick() {
+        guard isSessionRunning, mode == .plank, !passedPlank else { return }
+        let justPassed = plankHold.updateHoldTime(interval: 0.1)
+        if justPassed {
+            passedPlank = true
+            setFeedbackIfChanged("Plank completed")
+            finishSession()
+        }
+    }
+
+    // MARK: - Feedback Speech
+
+    /// Called whenever feedback text changes. Cleans and speaks it if appropriate.
     func handleFeedbackChange() {
         guard isSessionRunning else { return }
         let cleaned = speech.cleanForSpeech(feedback)
@@ -415,119 +456,103 @@ final class WorkoutSessionViewModel: ObservableObject {
         speech.speak(cleaned, language: speechLang, minInterval: 1.2)
     }
 
-    // MARK: - Squat preview / switch
-    private func startSquatPreviewThenSwitch() {
-        showSquatPreview = true
-        squatPreviewSeconds = previewDurationSeconds
+    // MARK: - Exercise Preview and Switching
+
+    /// Starts a countdown preview overlay before transitioning to the next exercise.
+    /// Used for both squat preview (after wall-sit) and plank preview (after squat).
+    private func beginTransitionCountdown(for nextMode: WorkoutSessionMode) {
+        let isSquat = (nextMode == .squat)
+
+        if isSquat {
+            showSquatPreview = true
+            squatPreviewSeconds = previewDurationSeconds
+        } else {
+            showPlankPreview = true
+            plankPreviewSeconds = previewDurationSeconds
+        }
 
         speech.speak(
-            WorkoutSessionMode.squat.demoInstructionText,
+            nextMode.demoInstructionText,
             language: speechLang,
             minInterval: 0,
             allowRepeat: true
         )
 
-        // countdown UI
+        // Countdown UI updates
         for i in 1...previewDurationSeconds {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(i)) { [weak self] in
                 guard let self else { return }
-                if self.showSquatPreview {
-                    self.squatPreviewSeconds = max(0, self.previewDurationSeconds - i)
+                let remaining = max(0, self.previewDurationSeconds - i)
+                if isSquat {
+                    if self.showSquatPreview { self.squatPreviewSeconds = remaining }
+                } else {
+                    if self.showPlankPreview { self.plankPreviewSeconds = remaining }
                 }
             }
         }
 
+        // Auto-switch after countdown completes
         DispatchQueue.main.asyncAfter(deadline: .now() + Double(previewDurationSeconds)) { [weak self] in
             guard let self else { return }
-            self.showSquatPreview = false
-            self.switchToSquat()
-        }
-    }
-
-    // MARK: - Plank preview / switch (after squat)
-    private func startPlankPreviewThenSwitch() {
-        showPlankPreview = true
-        plankPreviewSeconds = previewDurationSeconds
-
-        speech.speak(
-            WorkoutSessionMode.plank.demoInstructionText,
-            language: speechLang,
-            minInterval: 0,
-            allowRepeat: true
-        )
-
-        for i in 1...previewDurationSeconds {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i)) { [weak self] in
-                guard let self else { return }
-                if self.showPlankPreview {
-                    self.plankPreviewSeconds = max(0, self.previewDurationSeconds - i)
-                }
+            if isSquat {
+                self.showSquatPreview = false
+                self.switchToSquat()
+            } else {
+                self.showPlankPreview = false
+                self.switchToPlank()
             }
         }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + Double(previewDurationSeconds)) { [weak self] in
-            guard let self else { return }
-            self.showPlankPreview = false
-            self.switchToPlank()
-        }
     }
 
+    /// Transitions to squat mode with fresh counters and a new WebSocket connection.
     private func switchToSquat() {
-        guard isSessionRunning else { return }
-        guard !didSwitchToSquat else { return }
+        guard isSessionRunning, !didSwitchToSquat else { return }
 
         didSwitchToSquat = true
         mode = .squat
         backendState = BackendPhase.NO_POSE.rawValue
         setFeedbackIfChanged("PASSED (Switch to Squat)")
 
-        // reset squat counters (เริ่มนับใหม่)
+        // Reset movement counters for the new exercise
         totalReps = 0
         correctReps = 0
         incorrectReps = 0
         lastSpokenCorrectReps = 0
 
-        // squat helpers
         squatStandOK = false
         squatStarted = false
         lastStandOKAt = nil
         lastPleaseStartAt = .distantPast
 
-        // กัน wall-sit timer สะสมต่อหลังสลับไป squat
-        wallSitCountingActive = false
-        wallSitIsCorrectHold = false
+        // Stop the wall-sit hold timer from counting further
+        wallSitHold.isCountingActive = false
+        wallSitHold.isCurrentlyCorrect = false
 
-        // start squat streaming
         cameraManager.stopStreaming()
         cameraManager.startStreaming(to: activeWSURL)
-
     }
 
+    /// Transitions to plank mode with fresh counters and a new WebSocket connection.
     private func switchToPlank() {
-        guard isSessionRunning else { return }
-        guard !didSwitchToPlank else { return }
+        guard isSessionRunning, !didSwitchToPlank else { return }
 
         didSwitchToPlank = true
         mode = .plank
         backendState = BackendPhase.NO_POSE.rawValue
         setFeedbackIfChanged("PASSED (Switch to Plank)")
 
-        // reset plank counters
-        plankCorrectSeconds = 0
-        plankTargetSeconds = 5.0
-        plankConsecutiveCorrect = 0
-        plankCountingActive = false
-        plankIsCorrectHold = false
+        plankHold.reset()
         passedPlank = false
-        lastPlankPredWasCorrect = true
+        plankErrors.reset()
 
         cameraManager.stopStreaming()
         cameraManager.startStreaming(to: activeWSURL)
-
     }
 
-    // MARK: - Backend Message
-    private func handleBackendMessage(_ text: String) {
+    // MARK: - Backend Message Handling
+
+    /// Parses and routes incoming WebSocket messages from the backend.
+    private func processBackendMessage(_ text: String) {
         guard let data = text.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return
@@ -536,29 +561,7 @@ final class WorkoutSessionViewModel: ObservableObject {
         let type = obj["type"] as? String ?? ""
 
         if type == "status" {
-            let stateRaw = (obj["state"] as? String ?? BackendPhase.NO_POSE.rawValue).uppercased()
-            let msg = obj["message"] as? String
-
-            DispatchQueue.main.async {
-                self.backendState = stateRaw
-
-                // ถ้า NO_POSE ให้ reset hold/ready ต่าง ๆ (กัน timer นับค้าง)
-                if stateRaw == BackendPhase.NO_POSE.rawValue {
-                    if self.mode == .wallSit {
-                        self.wallSitIsCorrectHold = false
-                        self.wallSitCountingActive = false
-                        self.wallSitConsecutiveCorrect = 0
-                        self.correctSeconds = 0
-                    } else if self.mode == .plank {
-                        self.plankIsCorrectHold = false
-                        self.plankCountingActive = false
-                        self.plankConsecutiveCorrect = 0
-                        self.plankCorrectSeconds = 0
-                    }
-                }
-
-                if let msg { self.setFeedbackIfChanged(msg) }
-            }
+            processStatusMessage(obj)
             return
         }
 
@@ -569,315 +572,365 @@ final class WorkoutSessionViewModel: ObservableObject {
         }
 
         if type == "result" {
-            let predRaw = (obj["prediction"] as? String ?? "...")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-
-            let conf = obj["confidence"] as? Double
-
-            DispatchQueue.main.async {
-                // แสดง feedback (อย่าให้รัวเกินไปจน UI ดูสั่น)
-                if let conf {
-                    self.setFeedbackIfChanged("\(predRaw) • \(String(format: "%.2f", conf))")
-                } else {
-                    self.setFeedbackIfChanged("\(predRaw)")
-                }
-
-                // WALL-SIT
-                if self.mode == .wallSit {
-                    self.handleWallSitResult(pred: predRaw, conf: conf)
-                    return
-                }
-
-                // SQUAT
-                if self.mode == .squat {
-                    let backendMode = obj["mode"] as? String ?? ""
-
-                    // 1️⃣ STAND result (mode == "stand")
-                    if backendMode == "stand" {
-                        let standOk = obj["stand_ok"] as? Bool ?? false
-                        if standOk {
-                            self.lastSquatPredWasCorrect = true
-                            if !self.squatStandOK {
-                                self.squatStandOK = true
-                                self.lastStandOKAt = Date()
-                                self.speech.speak("Stand OK", language: self.speechLang, minInterval: 0)
-                            }
-                        } else {
-                            // stand_too_narrow / stand_too_wide
-                            self.speech.speak(Self.displayLabel(for: predRaw), language: self.speechLang, minInterval: 2.0)
-                        }
-                        return
-                    }
-
-                    // 2️⃣ BOTTOM result (mode == "bottom")
-                    self.squatStarted = true
-
-                    let reps = obj["reps"] as? [String: Any]
-                    let totalFromPayload = reps?["total"] as? Int
-                    if let totalFromPayload {
-                        self.totalReps = totalFromPayload
-                    }
-
-                    let currentRepNumber: Int? = {
-                        let rep = totalFromPayload ?? self.totalReps
-                        return rep > 0 ? rep : nil
-                    }()
-
-                    let isGoodRep = predRaw.hasPrefix("good")
-                    if !isGoodRep {
-                        // knee_ins / round_back / not_deep_enough
-                        if self.lastSquatPredWasCorrect {
-                            self.squatErrorCounts[predRaw] = (self.squatErrorCounts[predRaw] ?? 0) + 1
-                            self.squatMistakeEvents.append(
-                                MistakeEvent(
-                                    atSecond: self.sessionElapsedSecond(),
-                                    reason: Self.displayLabel(for: predRaw),
-                                    repNumber: currentRepNumber
-                                )
-                            )
-                        }
-                        self.lastSquatPredWasCorrect = false
-                    } else {
-                        self.lastSquatPredWasCorrect = true
-                    }
-
-                    // 3️⃣ REP UPDATE
-                    if let reps {
-                        let correct: Int? = (reps["correct"] as? Int)
-                            ?? (reps["good"] as? Int)
-                        if let correct = correct {
-                            if correct > self.correctReps {
-                                self.speech.speak("Good", language: self.speechLang, minInterval: 0.5, allowRepeat: true)
-                                self.lastSpokenCorrectReps = correct
-                            }
-                            self.correctReps = correct
-                        }
-
-                        let incorrect: Int? = (reps["incorrect"] as? Int) ?? (reps["bad"] as? Int)
-                        if let incorrect = incorrect {
-                            self.incorrectReps = incorrect
-                        }
-
-                        if self.correctReps >= self.squatTargetCorrectReps {
-                            self.speech.speak("Squat complete. Switch to Plank.", language: self.speechLang, minInterval: 0)
-                            self.cameraManager.stopStreaming()
-                            self.startPlankPreviewThenSwitch()
-                        }
-                    }
-                    return
-                }
-
-                // PLANK
-                if self.mode == .plank {
-                    self.handlePlankResult(pred: predRaw, conf: conf)
-                }
-
-                // LUNGES
-                if self.mode == .lunges {
-                    // Logic similar to Squat (counting reps)
-                    let reps = obj["reps"] as? [String: Any]
-                    let totalFromPayload = reps?["total"] as? Int
-                    if let totalFromPayload {
-                        self.totalReps = totalFromPayload
-                    }
-
-                    let currentRepNumber: Int? = {
-                        let rep = totalFromPayload ?? self.totalReps
-                        return rep > 0 ? rep : nil
-                    }()
-
-                    let isGoodRep = predRaw.hasPrefix("correct") // "correct" is the label for good lunges
-                    if !isGoodRep {
-                        // feet_too_forward, knee_over_toe, not_deep_enough, rear_knee_hit_floor
-                        if self.lastLungesPredWasCorrect {
-                            self.lungesErrorCounts[predRaw] = (self.lungesErrorCounts[predRaw] ?? 0) + 1
-                            self.lungesMistakeEvents.append(
-                                MistakeEvent(
-                                    atSecond: self.sessionElapsedSecond(),
-                                    reason: Self.displayLabel(for: predRaw),
-                                    repNumber: currentRepNumber
-                                )
-                            )
-                        }
-                        self.lastLungesPredWasCorrect = false
-                    } else {
-                        self.lastLungesPredWasCorrect = true
-                    }
-
-                    if let reps {
-                        let correct: Int? = (reps["correct"] as? Int)
-                        if let correct = correct {
-                            if correct > self.correctReps {
-                                self.speech.speak("Good", language: self.speechLang, minInterval: 0.5, allowRepeat: true)
-                                self.lastSpokenCorrectReps = correct
-                            }
-                            self.correctReps = correct
-                        }
-
-                        let incorrect: Int? = (reps["incorrect"] as? Int)
-                        if let incorrect = incorrect {
-                            self.incorrectReps = incorrect
-                        }
-
-                        if self.correctReps >= self.lungesTargetCorrectReps {
-                            self.speech.speak("Lunges complete.", language: self.speechLang, minInterval: 0)
-                            self.finishSession()
-                        }
-                    }
-                }
-            }
+            processResultMessage(obj)
             return
         }
     }
 
-    // MARK: - Wall-sit logic (3x correct gate -> then 5s hold timer)
-    private func handleWallSitResult(pred: String, conf: Double?) {
-        // รองรับ label แบบ dataset_correct / correct / passed ฯลฯ
+    /// Handles backend status messages (pose detection state changes).
+    private func processStatusMessage(_ obj: [String: Any]) {
+        let stateRaw = (obj["state"] as? String ?? BackendPhase.NO_POSE.rawValue).uppercased()
+        let msg = obj["message"] as? String
+
+        DispatchQueue.main.async {
+            self.backendState = stateRaw
+
+            // Reset hold state when pose is lost to prevent timers from counting stale data
+            if stateRaw == BackendPhase.NO_POSE.rawValue {
+                if self.mode == .wallSit {
+                    self.wallSitHold.isCurrentlyCorrect = false
+                    self.wallSitHold.isCountingActive = false
+                    self.wallSitHold.consecutiveCorrectCount = 0
+                    self.wallSitHold.elapsedSeconds = 0
+                } else if self.mode == .plank {
+                    self.plankHold.isCurrentlyCorrect = false
+                    self.plankHold.isCountingActive = false
+                    self.plankHold.consecutiveCorrectCount = 0
+                    self.plankHold.elapsedSeconds = 0
+                }
+            }
+
+            if let msg { self.setFeedbackIfChanged(msg) }
+        }
+    }
+
+    /// Routes result messages to the appropriate exercise handler.
+    private func processResultMessage(_ obj: [String: Any]) {
+        let predRaw = (obj["prediction"] as? String ?? "...")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let conf = obj["confidence"] as? Double
+
+        DispatchQueue.main.async {
+            // Update feedback display
+            if let conf {
+                self.setFeedbackIfChanged("\(predRaw) - \(String(format: "%.2f", conf))")
+            } else {
+                self.setFeedbackIfChanged("\(predRaw)")
+            }
+
+            switch self.mode {
+            case .wallSit:
+                self.processWallSitPrediction(pred: predRaw, conf: conf)
+            case .squat:
+                self.processSquatPrediction(pred: predRaw, conf: conf, obj: obj)
+            case .plank:
+                self.processPlankPrediction(pred: predRaw, conf: conf)
+            case .lunges:
+                self.processLungesPrediction(pred: predRaw, obj: obj)
+            }
+        }
+    }
+
+    // MARK: - Wall-Sit Result Handler
+
+    /// Processes wall-sit predictions using the isometric hold state machine.
+    private func processWallSitPrediction(pred: String, conf: Double?) {
         let p = pred.lowercased()
         let c = conf ?? 0.0
-
-        // ถือว่า "correct" ถ้า label มีคำว่า correct และ confidence ผ่าน threshold
         let isCorrectNow = p.contains("correct") && c >= wallSitConfThreshold
 
-        // ให้ timer รู้ว่าตอนนี้ correct อยู่ไหม (แม้ backend dedup)
-        wallSitIsCorrectHold = isCorrectNow
-
-        // นับข้อผิดพลาดแต่ละประเภท (สำหรับ summary) — เฉพาะตอนเปลี่ยนจาก correct → error (ไม่นับทุก message)
+        // Track errors with deduplication
         if isCorrectNow {
-            lastWallSitPredWasCorrect = true
-        } else {
-            if lastWallSitPredWasCorrect && shouldTrackAsMistakeLabel(pred) {
-                wallSitErrorCounts[pred] = (wallSitErrorCounts[pred] ?? 0) + 1
-                wallSitMistakeEvents.append(
-                    MistakeEvent(atSecond: sessionElapsedSecond(), reason: Self.displayLabel(for: pred), repNumber: nil)
-                )
-            }
-            lastWallSitPredWasCorrect = false
+            wallSitErrors.markPredictionAsCorrect()
+        } else if shouldTrackAsMistakeLabel(pred) {
+            wallSitErrors.recordMistakeIfTransitioned(
+                prediction: pred,
+                elapsedSeconds: sessionElapsedSecond(),
+                repNumber: nil,
+                displayLabel: Self.displayLabel(for: pred)
+            )
         }
 
         if passedWallSit { return }
 
-        // ---- Phase 1: ต้องได้ correct 3 ครั้งติดก่อน ----
-        if !wallSitCountingActive {
-            if isCorrectNow {
-                wallSitConsecutiveCorrect = min(3, wallSitConsecutiveCorrect + 1)
+        let action = wallSitHold.processIsometricPrediction(
+            isCorrect: isCorrectNow,
+            incorrectFeedback: incorrectFeedbackText(for: pred),
+            exerciseName: "Wall-Sit"
+        )
 
-                // พูดแค่ครั้งแรกที่เริ่มเข้า correct streak
-                if wallSitConsecutiveCorrect == 1 {
-                    speech.speak("OK", language: speechLang, minInterval: 0)
-                }
-
-                // ถึง 3 ครั้งติด => เริ่มนับเวลา
-                if wallSitConsecutiveCorrect >= 3 {
-                    wallSitCountingActive = true
-                    correctSeconds = 0
-                    targetSeconds = 5.0
-                    setFeedbackIfChanged("Start hold…")
-                } else {
-                    setFeedbackIfChanged("Correct \(wallSitConsecutiveCorrect)/3 • Keep holding")
-                }
-            } else {
-                // หลุด correct ก่อนครบ 3 => reset streak
-                if wallSitConsecutiveCorrect != 0 {
-                    wallSitConsecutiveCorrect = 0
-                    setFeedbackIfChanged(incorrectFeedbackText(for: pred))
-                }
-            }
-            return
-        }
-
-        // ---- Phase 2: กำลังนับเวลา 5s ----
-        if !isCorrectNow {
-            // หลุดตอนกำลังนับ => reset ทั้งหมด
-            wallSitCountingActive = false
-            wallSitIsCorrectHold = false
-            wallSitConsecutiveCorrect = 0
-            correctSeconds = 0
-            setFeedbackIfChanged(incorrectFeedbackText(for: pred))
-        }
+        applyIsometricAction(action)
     }
 
-    // MARK: - Plank logic (เหมือน wall-sit: 3x correct gate -> 5s hold)
-    func handlePlankTick() {
-        guard isSessionRunning else { return }
-        guard mode == .plank else { return }
-        guard plankCountingActive else { return }
-        guard !passedPlank else { return }
-        guard plankIsCorrectHold else { return }
+    // MARK: - Plank Result Handler
 
-        plankCorrectSeconds = min(plankTargetSeconds, plankCorrectSeconds + 0.1)
-
-        if plankCorrectSeconds >= plankTargetSeconds {
-            plankCorrectSeconds = plankTargetSeconds
-            passedPlank = true
-            setFeedbackIfChanged("Plank completed ✅")
-            finishSession()
-        }
-    }
-
-    private func handlePlankResult(pred: String, conf: Double?) {
+    /// Processes plank predictions using the isometric hold state machine.
+    private func processPlankPrediction(pred: String, conf: Double?) {
         let p = pred.lowercased()
         let c = conf ?? 0.0
-
         let isCorrectNow = p.contains("correct") && c >= plankConfThreshold
 
-        plankIsCorrectHold = isCorrectNow
-
-        // นับข้อผิดพลาดแต่ละประเภท — เฉพาะตอนเปลี่ยนจาก correct → error (ไม่นับทุก message)
+        // Track errors with deduplication
         if isCorrectNow {
-            lastPlankPredWasCorrect = true
-        } else {
-            if lastPlankPredWasCorrect && shouldTrackAsMistakeLabel(pred) {
-                plankErrorCounts[pred] = (plankErrorCounts[pred] ?? 0) + 1
-                plankMistakeEvents.append(
-                    MistakeEvent(atSecond: sessionElapsedSecond(), reason: Self.displayLabel(for: pred), repNumber: nil)
-                )
-            }
-            lastPlankPredWasCorrect = false
+            plankErrors.markPredictionAsCorrect()
+        } else if shouldTrackAsMistakeLabel(pred) {
+            plankErrors.recordMistakeIfTransitioned(
+                prediction: pred,
+                elapsedSeconds: sessionElapsedSecond(),
+                repNumber: nil,
+                displayLabel: Self.displayLabel(for: pred)
+            )
         }
 
         if passedPlank { return }
 
-        if !plankCountingActive {
-            if isCorrectNow {
-                plankConsecutiveCorrect = min(3, plankConsecutiveCorrect + 1)
+        let action = plankHold.processIsometricPrediction(
+            isCorrect: isCorrectNow,
+            incorrectFeedback: incorrectFeedbackText(for: pred),
+            exerciseName: "Plank"
+        )
 
-                if plankConsecutiveCorrect == 1 {
-                    speech.speak("OK", language: speechLang, minInterval: 0)
-                }
+        applyIsometricAction(action)
+    }
 
-                if plankConsecutiveCorrect >= 3 {
-                    plankCountingActive = true
-                    plankCorrectSeconds = 0
-                    plankTargetSeconds = 5.0
-                    setFeedbackIfChanged("Start plank hold…")
-                } else {
-                    setFeedbackIfChanged("Plank correct \(plankConsecutiveCorrect)/3 • Keep holding")
+    /// Applies a hold state action to the UI (speech and feedback).
+    private func applyIsometricAction(_ action: IsometricHoldState.Action) {
+        switch action {
+        case .none:
+            break
+        case .firstCorrectInStreak:
+            speech.speak("OK", language: speechLang, minInterval: 0)
+        case .gatePassed(let text):
+            setFeedbackIfChanged(text)
+        case .holdingProgress(let text):
+            setFeedbackIfChanged(text)
+        case .lostForm(let text):
+            setFeedbackIfChanged(text)
+        }
+    }
+
+    // MARK: - Squat Result Handler
+
+    /// Processes squat predictions, handling both stand-check and bottom-position phases.
+    private func processSquatPrediction(pred: String, conf: Double?, obj: [String: Any]) {
+        let backendMode = obj["mode"] as? String ?? ""
+
+        // Phase 1: Stand check (user must be in correct standing position first)
+        if backendMode == "stand" {
+            let standOk = obj["stand_ok"] as? Bool ?? false
+            if standOk {
+                squatErrors.markPredictionAsCorrect()
+                if !squatStandOK {
+                    squatStandOK = true
+                    lastStandOKAt = Date()
+                    speech.speak("Stand OK", language: speechLang, minInterval: 0)
                 }
             } else {
-                if plankConsecutiveCorrect != 0 {
-                    plankConsecutiveCorrect = 0
-                    setFeedbackIfChanged(incorrectFeedbackText(for: pred))
-                }
+                speech.speak(Self.displayLabel(for: pred), language: speechLang, minInterval: 2.0)
             }
             return
         }
 
-        if !isCorrectNow {
-            plankCountingActive = false
-            plankIsCorrectHold = false
-            plankConsecutiveCorrect = 0
-            plankCorrectSeconds = 0
-            setFeedbackIfChanged(incorrectFeedbackText(for: pred))
+        // Phase 2: Bottom position (actual squat reps)
+        squatStarted = true
+        processMovementPrediction(
+            pred: pred,
+            obj: obj,
+            tracker: &squatErrors,
+            goodPrefix: "good",
+            targetReps: squatTargetCorrectReps,
+            onComplete: { [weak self] in
+                guard let self else { return }
+                self.speech.speak("Squat complete. Switch to Plank.", language: self.speechLang, minInterval: 0)
+                self.cameraManager.stopStreaming()
+                self.beginTransitionCountdown(for: .plank)
+            }
+        )
+    }
+
+    // MARK: - Lunges Result Handler
+
+    /// Processes lunges predictions using the shared movement rep handler.
+    private func processLungesPrediction(pred: String, obj: [String: Any]) {
+        processMovementPrediction(
+            pred: pred,
+            obj: obj,
+            tracker: &lungesErrors,
+            goodPrefix: "correct",
+            targetReps: lungesTargetCorrectReps,
+            onComplete: { [weak self] in
+                guard let self else { return }
+                self.speech.speak("Lunges complete.", language: self.speechLang, minInterval: 0)
+                self.finishSession()
+            }
+        )
+    }
+
+    // MARK: - Shared Movement Rep Handler
+
+    /// Shared handler for movement exercises (squat, lunges) that counts reps and tracks errors.
+    ///
+    /// - Parameters:
+    ///   - pred: Lowercase prediction label from the backend.
+    ///   - obj: Full JSON message dictionary.
+    ///   - tracker: The exercise-specific error tracker to update.
+    ///   - goodPrefix: The label prefix indicating a correct rep (e.g., "good" for squat, "correct" for lunges).
+    ///   - targetReps: Number of correct reps needed to complete the exercise.
+    ///   - onComplete: Closure called when the target is reached.
+    private func processMovementPrediction(
+        pred: String,
+        obj: [String: Any],
+        tracker: inout ExerciseErrorTracker,
+        goodPrefix: String,
+        targetReps: Int,
+        onComplete: @escaping () -> Void
+    ) {
+        let reps = obj["reps"] as? [String: Any]
+        let totalFromPayload = reps?["total"] as? Int
+        if let totalFromPayload {
+            self.totalReps = totalFromPayload
+        }
+
+        let currentRepNumber: Int? = {
+            let rep = totalFromPayload ?? self.totalReps
+            return rep > 0 ? rep : nil
+        }()
+
+        let isGoodRep = pred.hasPrefix(goodPrefix)
+        if !isGoodRep {
+            if shouldTrackAsMistakeLabel(pred) {
+                tracker.recordMistakeIfTransitioned(
+                    prediction: pred,
+                    elapsedSeconds: sessionElapsedSecond(),
+                    repNumber: currentRepNumber,
+                    displayLabel: Self.displayLabel(for: pred)
+                )
+            }
+        } else {
+            tracker.markPredictionAsCorrect()
+        }
+
+        // Update rep counts from the payload
+        if let reps {
+            let correct: Int? = (reps["correct"] as? Int) ?? (reps["good"] as? Int)
+            if let correct = correct {
+                if correct > self.correctReps {
+                    self.speech.speak("Good", language: self.speechLang, minInterval: 0.5, allowRepeat: true)
+                    self.lastSpokenCorrectReps = correct
+                }
+                self.correctReps = correct
+            }
+
+            let incorrect: Int? = (reps["incorrect"] as? Int) ?? (reps["bad"] as? Int)
+            if let incorrect = incorrect {
+                self.incorrectReps = incorrect
+            }
+
+            if self.correctReps >= targetReps {
+                onComplete()
+            }
         }
     }
 
+    // MARK: - Session Summary Builder
+
+    /// Builds the complete session summary from accumulated exercise data.
+    private func buildSessionSummary() -> SessionSummary {
+        let totalTime = Int(Date().timeIntervalSince(startTime))
+        var calories = max(0, correctReps) * 4
+        if initialMode == .plank {
+            calories = Int(plankHold.elapsedSeconds * 0.5)
+        }
+
+        var items: [ExerciseSummaryItem] = []
+
+        if initialMode == .plank {
+            items.append(.isometric(
+                name: "Plank",
+                durationSeconds: plankHold.elapsedSeconds,
+                targetSeconds: plankHold.targetSeconds,
+                errors: buildErrorCounts(from: plankErrors.errorCounts),
+                mistakes: plankErrors.mistakeEvents
+            ))
+        } else if initialMode == .lunges {
+            items.append(.movement(
+                name: "Lunges",
+                totalReps: totalReps,
+                correctReps: correctReps,
+                incorrectReps: incorrectReps,
+                targetCorrectReps: lungesTargetCorrectReps,
+                errors: buildErrorCounts(from: lungesErrors.errorCounts),
+                mistakes: lungesErrors.mistakeEvents
+            ))
+        } else {
+            // Multi-exercise program: wall-sit -> squat -> plank
+            items.append(.isometric(
+                name: "Wall-Sit",
+                durationSeconds: wallSitHold.elapsedSeconds,
+                targetSeconds: wallSitHold.targetSeconds,
+                errors: buildErrorCounts(from: wallSitErrors.errorCounts),
+                mistakes: wallSitErrors.mistakeEvents
+            ))
+
+            items.append(.movement(
+                name: "Squat",
+                totalReps: totalReps,
+                correctReps: correctReps,
+                incorrectReps: incorrectReps,
+                targetCorrectReps: squatTargetCorrectReps,
+                errors: buildErrorCounts(from: squatErrors.errorCounts),
+                mistakes: squatErrors.mistakeEvents
+            ))
+
+            items.append(.isometric(
+                name: "Plank",
+                durationSeconds: plankHold.elapsedSeconds,
+                targetSeconds: plankHold.targetSeconds,
+                errors: buildErrorCounts(from: plankErrors.errorCounts),
+                mistakes: plankErrors.mistakeEvents
+            ))
+        }
+
+        return SessionSummary(items: items, totalTimeSeconds: totalTime, estimatedCalories: calories)
+    }
+
+    /// Converts an error count dictionary into sorted `ErrorCount` display models.
+    private func buildErrorCounts(from counts: [String: Int]) -> [ErrorCount] {
+        counts
+            .filter { $0.value > 0 }
+            .map { ErrorCount(reason: Self.displayLabel(for: $0.key), count: $0.value) }
+            .sorted { $0.count > $1.count }
+    }
+
+    // MARK: - Label Formatting
+
+    /// Converts a backend prediction label to human-readable display text.
+    /// Handles known labels explicitly and falls back to title-casing unknown labels.
+    private static func displayLabel(for backendLabel: String) -> String {
+        let p = backendLabel.lowercased()
+        if p.contains("feet_too_close") || p.contains("feet too close") { return "Feet too close" }
+        if p.contains("knee_ins") || p.contains("knees_in") || p.contains("knees in") { return "Knees in" }
+        if p.contains("round_back") { return "Round back" }
+        if p.contains("torso_lean_forward") || p.contains("torso lean forward") { return "Torso lean forward" }
+        if p.contains("knee_over_toe") || p.contains("knee over toe") { return "Knee over toe" }
+        if p.contains("not_deep_enough") { return "Not deep enough" }
+        if p.contains("stand_too_narrow") { return "Stand too narrow" }
+        if p.contains("stand_too_wide") { return "Stand too wide" }
+        // Fallback: replace underscores and title-case each word
+        let withSpaces = backendLabel.replacingOccurrences(of: "_", with: " ")
+        guard !withSpaces.isEmpty else { return backendLabel }
+        return withSpaces.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst().lowercased() }.joined(separator: " ")
+    }
+
     // MARK: - Helpers
+
+    /// Returns the number of seconds elapsed since the session started.
     private func sessionElapsedSecond() -> Int {
         max(0, Int(Date().timeIntervalSince(startTime)))
     }
 
+    /// Determines if a prediction label represents a trackable mistake (not a status/correct label).
     private func shouldTrackAsMistakeLabel(_ pred: String) -> Bool {
         let p = pred.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if p.isEmpty || p == "..." { return false }
@@ -886,6 +939,7 @@ final class WorkoutSessionViewModel: ObservableObject {
         return true
     }
 
+    /// Generates appropriate feedback text for an incorrect prediction.
     private func incorrectFeedbackText(for pred: String) -> String {
         let trimmed = pred.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != "..." else {
@@ -894,6 +948,7 @@ final class WorkoutSessionViewModel: ObservableObject {
         return Self.displayLabel(for: trimmed)
     }
 
+    /// Updates feedback only when the value actually changes (prevents unnecessary UI updates).
     private func setFeedbackIfChanged(_ newText: String) {
         if feedback != newText {
             feedback = newText

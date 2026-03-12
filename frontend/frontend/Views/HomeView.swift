@@ -1,10 +1,12 @@
 import SwiftUI
 
+/// Home screen displaying a greeting, navigation buttons, and available workout programs.
 struct HomeView: View {
     @ObservedObject var authService: AuthService
     @ObservedObject var profileService: ProfileService
     @StateObject private var viewModel = HomeViewModel()
 
+    /// Resolves the display name: profile name first, then auth display name, then fallback.
     private var displayName: String {
         let fromProfile = profileService.currentProfile?.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if let name = fromProfile, !name.isEmpty { return name }
@@ -66,6 +68,9 @@ struct HomeView: View {
     }
 }
 
+// MARK: - Menu Button
+
+/// Circular icon button with a label used for top navigation shortcuts.
 fileprivate struct MenuButton: View {
     let icon: String
     let title: String
@@ -84,6 +89,9 @@ fileprivate struct MenuButton: View {
     }
 }
 
+// MARK: - Workout Set Card
+
+/// Card displaying a workout program with a background image, title, and description.
 fileprivate struct WorkoutSetCard: View {
     let title: String
     let description: String
@@ -117,7 +125,6 @@ fileprivate struct WorkoutSetCard: View {
         }
     }
 }
-
 
 #Preview {
     HomeView(authService: AuthService(), profileService: ProfileService())

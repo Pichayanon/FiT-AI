@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Displays the post-workout result screen with exercise summaries, stats, and error details.
 struct WorkoutResultView: View {
     @StateObject private var viewModel: WorkoutResultViewModel
     @Environment(\.dismiss) private var dismiss
@@ -14,7 +15,7 @@ struct WorkoutResultView: View {
         VStack(spacing: 0) {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 24) {
-                    // Success moment: completion + primary stats
+                    // Completion header with primary stats
                     VStack(spacing: 16) {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 56))
@@ -75,7 +76,9 @@ struct WorkoutResultView: View {
     }
 }
 
-// MARK: - Top stat pill (time / calories)
+// MARK: - Stat Pill
+
+/// Compact pill showing an SF Symbol icon with a text value (e.g., clock + "2 min 30 sec").
 fileprivate struct StatPill: View {
     let icon: String
     let value: String
@@ -97,14 +100,16 @@ fileprivate struct StatPill: View {
     }
 }
 
-// MARK: - One exercise card (stats + progress + what went wrong)
+// MARK: - Summary Exercise Card
+
+/// Card displaying detailed stats for one exercise (reps/hold, errors, mistake timeline).
 fileprivate struct SummaryExerciseCard: View {
     let item: ExerciseSummaryItem
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
-                Image(systemName: iconName)
+                Image(systemName: "figure.strengthtraining.traditional")
                     .font(.title2)
                     .foregroundColor(.yellow)
                     .frame(width: 44, height: 44)
@@ -121,28 +126,38 @@ fileprivate struct SummaryExerciseCard: View {
             switch item {
             case .movement(_, let totalReps, let correctReps, let incorrectReps, let targetCorrectReps, let errors, let mistakes):
                 VStack(alignment: .leading, spacing: 8) {
-                    progressBar(progress: targetCorrectReps > 0 ? Double(correctReps) / Double(targetCorrectReps) : 0)
+                    ProgressBarView(
+                        progress: targetCorrectReps > 0 ? Double(correctReps) / Double(targetCorrectReps) : 0,
+                        height: 6,
+                        fillColor: .yellow,
+                        trackColor: .white.opacity(0.12)
+                    )
                     Text("\(correctReps) / \(targetCorrectReps) reps")
                         .font(.subheadline)
                         .fontWeight(.medium)
                         .foregroundColor(.white)
                     if totalReps > 0 {
-                        Text("Total \(totalReps) reps · \(incorrectReps) incorrect")
+                        Text("Total \(totalReps) reps - \(incorrectReps) incorrect")
                             .font(.caption)
                             .foregroundColor(.gray)
                     }
-                    errorsBlock(errors)
-                    mistakesBlock(mistakes)
+                    ErrorsBlock(errors: errors)
+                    MistakesBlock(mistakes: mistakes)
                 }
 
             case .isometric(_, let durationSeconds, let targetSeconds, let errors, _):
                 VStack(alignment: .leading, spacing: 8) {
-                    progressBar(progress: targetSeconds > 0 ? durationSeconds / targetSeconds : 0)
+                    ProgressBarView(
+                        progress: targetSeconds > 0 ? durationSeconds / targetSeconds : 0,
+                        height: 6,
+                        fillColor: .yellow,
+                        trackColor: .white.opacity(0.12)
+                    )
                     Text("\(formatSeconds(durationSeconds)) / \(formatSeconds(targetSeconds))")
                         .font(.subheadline)
                         .fontWeight(.medium)
                         .foregroundColor(.white)
-                    errorsBlock(errors)
+                    ErrorsBlock(errors: errors)
                 }
             }
         }
@@ -151,23 +166,18 @@ fileprivate struct SummaryExerciseCard: View {
         .cornerRadius(16)
     }
 
-    private func progressBar(progress: Double) -> some View {
-        let p = min(1, max(0, progress))
-        return GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.white.opacity(0.12))
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.yellow)
-                    .frame(width: geo.size.width * p)
-            }
-        }
-        .frame(height: 6)
-        .frame(maxWidth: .infinity)
+    private func formatSeconds(_ s: Double) -> String {
+        "\(Int(round(s))) sec"
     }
+}
 
-    /// What went wrong — framed as feedback, not blame
-    private func errorsBlock(_ errors: [ErrorCount]) -> some View {
+// MARK: - Errors Block
+
+/// Lists error reasons with their counts, or "None" if empty.
+fileprivate struct ErrorsBlock: View {
+    let errors: [ErrorCount]
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("What went wrong")
                 .font(.caption)
@@ -179,15 +189,22 @@ fileprivate struct SummaryExerciseCard: View {
                     .foregroundColor(.gray.opacity(0.7))
             } else {
                 ForEach(errors) { e in
-                    Text("• \(e.reason) — \(e.count) times")
+                    Text("\u{2022} \(e.reason) -- \(e.count) times")
                         .font(.subheadline)
                         .foregroundColor(.orange.opacity(0.95))
                 }
             }
         }
     }
+}
 
-    private func mistakesBlock(_ mistakes: [MistakeEvent]) -> some View {
+// MARK: - Mistakes Block
+
+/// Lists timestamped mistake events, or a "no mistakes" message if empty.
+fileprivate struct MistakesBlock: View {
+    let mistakes: [MistakeEvent]
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Mistake timeline")
                 .font(.caption)
@@ -207,24 +224,10 @@ fileprivate struct SummaryExerciseCard: View {
         }
     }
 
-    private var iconName: String {
-        switch item.displayName.lowercased() {
-        case "wall-sit": return "figure.strengthtraining.traditional"
-        case "squat": return "figure.strengthtraining.traditional"
-        case "plank": return "figure.strengthtraining.traditional"
-        default: return "figure.strengthtraining.traditional"
-        }
-    }
-
-    private func formatSeconds(_ s: Double) -> String {
-        let n = Int(round(s))
-        return "\(n) sec"
-    }
-
     private func mistakeTimelineText(_ event: MistakeEvent) -> String {
         if let rep = event.repNumber {
-            return "• \(event.reason) — Rep \(rep)"
+            return "\u{2022} \(event.reason) -- Rep \(rep)"
         }
-        return "• \(event.reason)"
+        return "\u{2022} \(event.reason)"
     }
 }
