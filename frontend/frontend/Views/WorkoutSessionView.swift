@@ -99,7 +99,7 @@ struct WorkoutSessionView: View {
     // MARK: - Center Guide (first exercise is wall-sit)
     private var guideCenterOverlay: some View {
         VStack(spacing: 12) {
-            WallSitGuideOverlayCompact()
+            currentGuideOverlay
 
             Text("Set camera to SIDE VIEW\nPress Start when ready")
                 .font(.subheadline.weight(.semibold))
@@ -116,45 +116,19 @@ struct WorkoutSessionView: View {
 
     // MARK: - Squat Preview Overlay
     private var squatPreviewOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.45).ignoresSafeArea()
-
-            VStack(spacing: 12) {
-                SquatGuideOverlayCompact()
-
-                Text("Next: Squat\nStarting in \(viewModel.squatPreviewSeconds)s")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .background(Color.black.opacity(0.45))
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-            .padding(.horizontal, 18)
-            .offset(y: -40)
+        previewOverlay(
+            title: "Next: Squat\nStarting in \(viewModel.squatPreviewSeconds)s"
+        ) {
+            SquatGuideOverlayCompact()
         }
     }
 
     // MARK: - Plank Preview Overlay
     private var plankPreviewOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.45).ignoresSafeArea()
-
-            VStack(spacing: 12) {
-                PlankGuideOverlayCompact()
-
-                Text("Next: Plank\nStarting in \(viewModel.plankPreviewSeconds)s")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .background(Color.black.opacity(0.45))
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-            .padding(.horizontal, 18)
-            .offset(y: -40)
+        previewOverlay(
+            title: "Next: Plank\nStarting in \(viewModel.plankPreviewSeconds)s"
+        ) {
+            PlankGuideOverlayCompact()
         }
     }
 
@@ -243,9 +217,49 @@ struct WorkoutSessionView: View {
                 wallSitProgressCard
             } else if viewModel.mode == .squat {
                 squatProgressCard
-            } else {
+            } else if viewModel.mode == .plank {
                 plankProgressCard
+            } else {
+                lungesProgressCard
             }
+        }
+    }
+
+    @ViewBuilder
+    private var currentGuideOverlay: some View {
+        switch viewModel.mode {
+        case .wallSit:
+            WallSitGuideOverlayCompact()
+        case .squat:
+            SquatGuideOverlayCompact()
+        case .plank:
+            PlankGuideOverlayCompact()
+        case .lunges:
+            LungesGuideOverlayCompact()
+        }
+    }
+
+    private func previewOverlay<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        ZStack {
+            Color.black.opacity(0.45).ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                content()
+
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .padding(.horizontal, 18)
+            .offset(y: -40)
         }
     }
 
@@ -333,6 +347,28 @@ struct WorkoutSessionView: View {
             }
 
             progressBar(viewModel.plankProgress01, height: 10)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.24))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var lungesProgressCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Lunges Goal")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                Spacer()
+                Text("\(viewModel.correctReps) / \(viewModel.lungesTargetCorrectReps) correct")
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(.white.opacity(0.9))
+                    .monospacedDigit()
+            }
+
+            progressBar(viewModel.lungesProgress01, height: 10)
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
@@ -501,6 +537,36 @@ private struct PlankGuideOverlayCompact: View {
                 .padding(.vertical, 8)
                 .background(Color.black.opacity(0.45))
                 .clipShape(Capsule())
+        }
+    }
+}
+
+// MARK: - Guide Overlay Compact (Lunges)
+private struct LungesGuideOverlayCompact: View {
+    // Assuming you might add lunge images later, for now using a placeholder or squat images if unavailable
+    private let frames = ["squat_01", "squat_02"] // Placeholder: Replace with lunge images if available
+
+    var body: some View {
+        TimelineView(.periodic(from: Date(), by: 1.1)) { context in
+            let idx = Int(context.date.timeIntervalSince1970 / 1.1) % frames.count
+            VStack(spacing: 10) {
+                // If you have lunge images, use them here. Otherwise re-using squat as placeholder or just text.
+                // Ideally: Image("lunge_01") etc.
+                Image(frames[idx])
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 260, maxHeight: 200)
+                    .shadow(radius: 10)
+                    .animation(.easeInOut(duration: 0.2), value: idx)
+
+                Text("Step forward → Lower → Push back")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(Capsule())
+            }
         }
     }
 }

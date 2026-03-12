@@ -1,6 +1,127 @@
 import Foundation
 
+private enum WorkoutDateFormatters {
+    static let historyDate: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    static let relativeHistoryDate: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE, MMM d"
+        return formatter
+    }()
+}
+
 // MARK: - Progress / Summary models
+
+enum WorkoutSessionMode: String {
+    case wallSit
+    case squat
+    case plank
+    case lunges
+
+    var displayName: String {
+        switch self {
+        case .wallSit:
+            return "Wall-Sit"
+        case .squat:
+            return "Squat"
+        case .plank:
+            return "Plank"
+        case .lunges:
+            return "Lunges"
+        }
+    }
+
+    var demoInstructionText: String {
+        switch self {
+        case .wallSit:
+            return "Wall-sit. Stand sideways to the camera and make sure your full body is visible. Keep your back against the wall, lower down until your knees are about 90 degrees. Keep your body straight and hold the position."
+        case .squat:
+            return "Squat. Face the camera and make sure your full body is visible. Slowly lower your body until your hips are at knee level. Then push back up to a standing position."
+        case .plank:
+            return "Plank. Stand sideways to the camera and make sure your full body is visible. Lower yourself down onto your forearms, keeping your elbows under your shoulders. Keep your body straight and hold the position."
+        case .lunges:
+            return "Lunges. Stand sideways to the camera and make sure your full body is visible. Step forward, lower until both knees bend comfortably, then push back to the starting position."
+        }
+    }
+}
+
+struct WorkoutProgramDefinition: Identifiable {
+    let id = UUID()
+    let title: String
+    let description: String
+    let imageName: String
+    let exercises: [WorkoutExercise]
+    let initialMode: WorkoutSessionMode
+}
+
+enum WorkoutCatalog {
+    static let beginnerLevel1 = WorkoutProgramDefinition(
+        title: "Beginner Level 1",
+        description: "Squat, High Knees, Mountain Climbers",
+        imageName: "set1",
+        exercises: [
+            WorkoutExercise(name: "Wall-Sit", imageName: "wallsit", reps: "5s hold"),
+            WorkoutExercise(name: "Squat", imageName: "squat", reps: "3 correct reps"),
+            WorkoutExercise(name: "Plank", imageName: "plank", reps: "5s hold"),
+        ],
+        initialMode: .wallSit
+    )
+
+    static let beginnerLevel2 = WorkoutProgramDefinition(
+        title: "Beginner Level 2",
+        description: "Plank",
+        imageName: "set2",
+        exercises: [
+            WorkoutExercise(name: "Plank", imageName: "plank", reps: "5s hold"),
+        ],
+        initialMode: .plank
+    )
+
+    static let beginnerLevel3 = WorkoutProgramDefinition(
+        title: "Beginner Level 3",
+        description: "Lunges",
+        imageName: "set3",
+        exercises: [
+            WorkoutExercise(name: "Lunges", imageName: "lunges", reps: "3 correct reps"),
+        ],
+        initialMode: .lunges
+    )
+
+    static let programs: [WorkoutProgramDefinition] = [
+        beginnerLevel1,
+        beginnerLevel2,
+        beginnerLevel3,
+    ]
+
+    static func program(for title: String) -> WorkoutProgramDefinition {
+        programs.first(where: { $0.title == title }) ?? beginnerLevel1
+    }
+}
+
+enum WorkoutTextFormatter {
+    static func minuteSecondString(
+        for totalSeconds: Int,
+        secondSuffix: String = "sec"
+    ) -> String {
+        "\(totalSeconds / 60) min \(totalSeconds % 60) \(secondSuffix)"
+    }
+
+    static func historyDateString(for date: Date) -> String {
+        WorkoutDateFormatters.historyDate.string(from: date)
+    }
+
+    static func relativeHistoryDateString(for date: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return "Today" }
+        if calendar.isDateInYesterday(date) { return "Yesterday" }
+        return WorkoutDateFormatters.relativeHistoryDate.string(from: date)
+    }
+}
 
 struct DailyCalorie: Identifiable {
     let id = UUID()
@@ -165,22 +286,19 @@ struct WorkoutHistoryItem: Identifiable {
     let record: WorkoutSessionRecord
 
     var formattedDate: String {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return f.string(from: completedAt)
+        WorkoutTextFormatter.historyDateString(for: completedAt)
     }
 
     var relativeDate: String {
-        let cal = Calendar.current
-        if cal.isDateInToday(completedAt) { return "Today" }
-        if cal.isDateInYesterday(completedAt) { return "Yesterday" }
-        let f = DateFormatter()
-        f.dateFormat = "EEEE, MMM d"
-        return f.string(from: completedAt)
+        WorkoutTextFormatter.relativeHistoryDateString(for: completedAt)
     }
 
-    var formattedDuration: String { "\(totalTimeSeconds / 60) min \(totalTimeSeconds % 60) s" }
+    var formattedDuration: String {
+        WorkoutTextFormatter.minuteSecondString(
+            for: totalTimeSeconds,
+            secondSuffix: "s"
+        )
+    }
 }
 
 extension SessionSummary {
@@ -226,4 +344,3 @@ extension SessionSummary {
         )
     }
 }
-

@@ -135,7 +135,7 @@ fileprivate struct SummaryExerciseCard: View {
                     mistakesBlock(mistakes)
                 }
 
-            case .isometric(_, let durationSeconds, let targetSeconds, let errors, let mistakes):
+            case .isometric(_, let durationSeconds, let targetSeconds, let errors, _):
                 VStack(alignment: .leading, spacing: 8) {
                     progressBar(progress: targetSeconds > 0 ? durationSeconds / targetSeconds : 0)
                     Text("\(formatSeconds(durationSeconds)) / \(formatSeconds(targetSeconds))")
@@ -143,7 +143,6 @@ fileprivate struct SummaryExerciseCard: View {
                         .fontWeight(.medium)
                         .foregroundColor(.white)
                     errorsBlock(errors)
-                    mistakesBlock(mistakes)
                 }
             }
         }
@@ -222,16 +221,10 @@ fileprivate struct SummaryExerciseCard: View {
         return "\(n) sec"
     }
 
-    private func formatTimelineSecond(_ second: Int) -> String {
-        let m = max(0, second) / 60
-        let s = max(0, second) % 60
-        return String(format: "%02d:%02d", m, s)
-    }
-
     private func mistakeTimelineText(_ event: MistakeEvent) -> String {
         if let rep = event.repNumber {
-            return "• Rep \(rep) — \(event.reason) (\(formatTimelineSecond(event.atSecond)))"
+            return "• \(event.reason) — Rep \(rep)"
         }
-        return "• \(formatTimelineSecond(event.atSecond)) — \(event.reason)"
+        return "• \(event.reason)"
     }
 }

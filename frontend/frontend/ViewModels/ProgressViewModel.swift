@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 
+/// Loads workout history and derives the progress-screen aggregates from it.
 @MainActor
 final class ProgressViewModel: ObservableObject {
     @Published var isLoading = false
@@ -20,16 +21,7 @@ final class ProgressViewModel: ObservableObject {
         defer { isLoading = false }
         do {
             let sessions = try await workoutHistory.fetchSessions(limit: 50)
-            historyItems = sessions.map { id, record in
-                WorkoutHistoryItem(
-                    id: id,
-                    setTitle: record.setTitle,
-                    completedAt: Date(timeIntervalSince1970: record.completedAtSeconds),
-                    totalTimeSeconds: record.totalTimeSeconds,
-                    estimatedCalories: record.estimatedCalories,
-                    record: record
-                )
-            }
+            historyItems = buildHistoryItems(from: sessions)
             calorieStats = computeCalorieStats()
             workoutSummaries = computeWorkoutSummaries()
         } catch {
@@ -40,27 +32,43 @@ final class ProgressViewModel: ObservableObject {
         }
     }
 
-    private func emptyCalorieStats() -> [DailyCalorie] {
+    private func buildHistoryItems(
+        from sessions: [(id: String, record: WorkoutSessionRecord)]
+    ) -> [WorkoutHistoryItem] {
+        sessions.map { id, record in
+            WorkoutHistoryItem(
+                id: id,
+                setTitle: record.setTitle,
+                completedAt: Date(timeIntervalSince1970: record.completedAtSeconds),
+                totalTimeSeconds: record.totalTimeSeconds,
+                estimatedCalories: record.estimatedCalories,
+                record: record
+            )
+        }
+    }
+
+    private func recentDays(count: Int) -> [Date] {
         let today = calendar.startOfDay(for: Date())
-        return (0..<7).compactMap { offset in
-            calendar.date(byAdding: .day, value: -offset, to: today).map { DailyCalorie(date: $0, calories: 0) }
+        return (0..<count).compactMap { offset in
+            calendar.date(byAdding: .day, value: -offset, to: today)
         }.reversed()
     }
 
+    private func emptyCalorieStats() -> [DailyCalorie] {
+        recentDays(count: 7).map { DailyCalorie(date: $0, calories: 0) }
+    }
+
     private func computeCalorieStats() -> [DailyCalorie] {
-        let today = calendar.startOfDay(for: Date())
+        let days = recentDays(count: 7)
         var dayCalories: [Date: Int] = [:]
-        for offset in 0..<7 {
-            guard let day = calendar.date(byAdding: .day, value: -offset, to: today) else { continue }
+        for day in days {
             dayCalories[day] = 0
         }
         for item in historyItems {
             let day = calendar.startOfDay(for: item.completedAt)
             dayCalories[day, default: 0] += item.estimatedCalories
         }
-        return (0..<7).compactMap { offset in
-            calendar.date(byAdding: .day, value: -offset, to: today).map { DailyCalorie(date: $0, calories: dayCalories[$0] ?? 0) }
-        }.reversed()
+        return days.map { DailyCalorie(date: $0, calories: dayCalories[$0] ?? 0) }
     }
 
     private func computeWorkoutSummaries() -> [WorkoutSetSummary] {

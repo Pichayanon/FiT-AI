@@ -10,7 +10,6 @@ final class WorkoutResultViewModel: ObservableObject {
     }
 
     var formattedTotalTime: String {
-        let t = summary.totalTimeSeconds
-        return "\(t / 60) min \(t % 60) sec"
+        WorkoutTextFormatter.minuteSecondString(for: summary.totalTimeSeconds)
     }
 }

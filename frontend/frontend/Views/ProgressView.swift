@@ -287,6 +287,24 @@ private struct HistoryExerciseCard: View {
                         .font(.caption)
                         .foregroundColor(.gray)
                 }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Mistake timeline")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.gray)
+                    if exercise.mistakes.isEmpty {
+                        Text("No mistake records")
+                            .font(.subheadline)
+                            .foregroundColor(.gray.opacity(0.7))
+                    } else {
+                        ForEach(Array(exercise.mistakes.enumerated()), id: \.offset) { _, event in
+                            Text(mistakeTimelineText(event))
+                                .font(.subheadline)
+                                .foregroundColor(.orange.opacity(0.95))
+                        }
+                    }
+                }
             } else {
                 if let dur = exercise.durationSeconds, let tgt = exercise.targetSeconds {
                     progressBar(progress: tgt > 0 ? dur / tgt : 0)
@@ -315,23 +333,6 @@ private struct HistoryExerciseCard: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Mistake timeline")
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .foregroundColor(.gray)
-                if exercise.mistakes.isEmpty {
-                    Text("No mistake timestamps")
-                        .font(.subheadline)
-                        .foregroundColor(.gray.opacity(0.7))
-                } else {
-                    ForEach(Array(exercise.mistakes.enumerated()), id: \.offset) { _, event in
-                        Text(mistakeTimelineText(event))
-                            .font(.subheadline)
-                            .foregroundColor(.orange.opacity(0.95))
-                    }
-                }
-            }
         }
         .padding(16)
         .background(Color.white.opacity(0.06))
@@ -361,16 +362,10 @@ private struct HistoryExerciseCard: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func formatTimelineSecond(_ second: Int) -> String {
-        let m = max(0, second) / 60
-        let s = max(0, second) % 60
-        return String(format: "%02d:%02d", m, s)
-    }
-
     private func mistakeTimelineText(_ event: MistakeEventRecord) -> String {
         if let rep = event.repNumber {
-            return "• Rep \(rep) — \(event.reason) (\(formatTimelineSecond(event.atSecond)))"
+            return "• \(event.reason) — Rep \(rep)"
         }
-        return "• \(formatTimelineSecond(event.atSecond)) — \(event.reason)"
+        return "• \(event.reason)"
     }
 }
