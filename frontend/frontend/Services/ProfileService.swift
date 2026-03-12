@@ -3,7 +3,10 @@ import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
 
-/// โหลด/บันทึกโปรไฟล์ผู้ใช้จาก Firestore (collection: users, document: uid)
+/// Loads and saves the current user's profile from Firestore (collection: "users", document: uid).
+///
+/// Automatically loads the profile when the user signs in and clears it on sign-out
+/// via a Firebase auth state listener.
 @MainActor
 final class ProfileService: ObservableObject {
     @Published private(set) var currentProfile: UserProfile?
@@ -36,7 +39,7 @@ final class ProfileService: ObservableObject {
 
     var uid: String? { Auth.auth().currentUser?.uid }
 
-    /// โหลดโปรไฟล์จาก Firestore
+    /// Loads the user profile from Firestore. Falls back to an empty profile on error.
     func load() async {
         guard let uid = uid else { currentProfile = nil; return }
         errorMessage = nil
@@ -53,7 +56,7 @@ final class ProfileService: ObservableObject {
         }
     }
 
-    /// บันทึกโปรไฟล์ลง Firestore
+    /// Saves the given profile to Firestore, merging with existing data.
     func save(_ profile: UserProfile) async {
         guard let uid = uid else {
             errorMessage = "Not logged in"
@@ -70,6 +73,7 @@ final class ProfileService: ObservableObject {
         }
     }
 
+    /// Clears any displayed error message.
     func clearError() {
         errorMessage = nil
     }

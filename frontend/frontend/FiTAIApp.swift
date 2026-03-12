@@ -1,8 +1,10 @@
 import SwiftUI
 import FirebaseCore
 
+/// Root application entry point. Configures Firebase and routes between Login and Home
+/// based on the current authentication state.
 @main
-struct frontendApp: App {
+struct FiTAIApp: App {
     @StateObject private var authService = AuthService()
     @StateObject private var profileService = ProfileService()
 

@@ -1,140 +1,16 @@
 import SwiftUI
 import Charts
 
+/// Shows workout progress: weekly calorie chart, workout summaries, and session history.
 struct ProgressView: View {
     @StateObject private var viewModel = ProgressViewModel()
 
     var body: some View {
         ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    Text("Calories Burned This Week")
-                        .font(.headline)
-                        .foregroundColor(.white)
-
-                    Chart {
-                        ForEach(viewModel.calorieStats) { day in
-                            BarMark(
-                                x: .value("Day", day.date, unit: .day),
-                                y: .value("Calories", day.calories)
-                            )
-                            .foregroundStyle(.orange)
-                            .annotation(position: .overlay, alignment: .center) {
-                                NavigationLink(destination: DailyDetailView(date: day.date)) {
-                                    Rectangle()
-                                        .foregroundColor(.clear)
-                                        .frame(width: 30, height: 200)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .annotation(position: .top) {
-                                Text("\(day.calories)")
-                                    .font(.caption)
-                                    .foregroundColor(.white)
-                            }
-                        }
-                    }
-                    .chartYScale(domain: 0...300)
-                    .chartXAxis {
-                        AxisMarks(values: .stride(by: .day)) { value in
-                            AxisGridLine()
-                            AxisValueLabel(format: .dateTime.weekday(.narrow))
-                        }
-                    }
-                    .frame(height: 220)
-                    .background(Color.gray.opacity(0.15))
-                    .cornerRadius(12)
-
-                    Text("Workout Summary")
-                        .font(.headline)
-                        .foregroundColor(.white)
-
-                    if viewModel.workoutSummaries.isEmpty && !viewModel.isLoading {
-                        Text("No workouts yet")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
-                            .padding(.vertical, 8)
-                    } else {
-                        ForEach(viewModel.workoutSummaries) { summary in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(summary.name)
-                                        .font(.subheadline)
-                                        .foregroundColor(.yellow)
-                                    Text("Completed \(summary.timesCompleted) times")
-                                        .font(.caption)
-                                        .foregroundColor(.gray)
-                                }
-                                Spacer()
-                                Text("\(summary.totalCalories) kcal")
-                                    .font(.body)
-                                    .foregroundColor(.orange)
-                            }
-                            .padding()
-                            .background(Color.gray.opacity(0.15))
-                            .cornerRadius(12)
-                        }
-                    }
-
-                    Text("History")
-                        .font(.headline)
-                        .foregroundColor(.white)
-
-                    if let err = viewModel.errorMessage {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Could not load history")
-                                .font(.subheadline)
-                                .foregroundColor(.orange)
-                            Text(err)
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                            HStack(spacing: 12) {
-                                if let url = urlFromError(err) {
-                                    Button("Open link to create index") {
-                                        UIApplication.shared.open(url)
-                                    }
-                                    .font(.subheadline)
-                                    .foregroundColor(.yellow)
-                                }
-                                Button("Retry") { Task { await viewModel.load() } }
-                                    .font(.subheadline)
-                                    .foregroundColor(.yellow)
-                            }
-                        }
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.orange.opacity(0.1))
-                        .cornerRadius(12)
-                    } else if viewModel.isLoading && viewModel.historyItems.isEmpty {
-                        HStack(spacing: 8) {
-                            SwiftUI.ProgressView()
-                                .progressViewStyle(CircularProgressViewStyle(tint: .yellow))
-                            Text("Loading…")
-                                .font(.subheadline)
-                                .foregroundColor(.gray)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 24)
-                    } else if viewModel.historyItems.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("No history yet")
-                                .font(.subheadline)
-                                .foregroundColor(.gray)
-                            Text("Make sure you’re signed in, then complete a workout and tap End session. It will appear here.")
-                                .font(.caption)
-                                .foregroundColor(.gray.opacity(0.9))
-                        }
-                        .padding(.vertical, 16)
-                    } else {
-                        VStack(spacing: 10) {
-                            ForEach(viewModel.historyItems) { item in
-                                NavigationLink(destination: HistoryDetailView(item: item)) {
-                                    HistoryRow(item: item)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-
+                    weeklyChartSection
+                    summarySection
+                    historySection
                     Spacer()
                 }
                 .padding()
@@ -145,8 +21,164 @@ struct ProgressView: View {
             .refreshable { await viewModel.load() }
             .task { await viewModel.load() }
     }
+    
+    // MARK: - Weekly Chart Section
+    
+    private var weeklyChartSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Calories Burned This Week")
+                .font(.headline)
+                .foregroundColor(.white)
 
-    /// ดึง URL จากข้อความ error (เช่น Firestore index link) เพื่อให้กดเปิดได้
+            Chart {
+                ForEach(viewModel.calorieStats) { day in
+                    BarMark(
+                        x: .value("Day", day.date, unit: .day),
+                        y: .value("Calories", day.calories)
+                    )
+                    .foregroundStyle(.orange)
+                    .annotation(position: .overlay, alignment: .center) {
+                        NavigationLink(destination: DailyDetailView(date: day.date)) {
+                            Rectangle()
+                                .foregroundColor(.clear)
+                                .frame(width: 30, height: 200)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .annotation(position: .top) {
+                        Text("\(day.calories)")
+                            .font(.caption)
+                            .foregroundColor(.white)
+                    }
+                }
+            }
+            .chartYScale(domain: 0...300)
+            .chartXAxis {
+                AxisMarks(values: .stride(by: .day)) { value in
+                    AxisGridLine()
+                    AxisValueLabel(format: .dateTime.weekday(.narrow))
+                }
+            }
+            .frame(height: 220)
+            .background(Color.gray.opacity(0.15))
+            .cornerRadius(12)
+        }
+    }
+    
+    // MARK: - Summary Section
+    
+    private var summarySection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Workout Summary")
+                .font(.headline)
+                .foregroundColor(.white)
+
+            if viewModel.isLoading && viewModel.workoutSummaries.isEmpty {
+                HStack(spacing: 8) {
+                    SwiftUI.ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .yellow))
+                    Text("Loading...")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 24)
+            } else if viewModel.workoutSummaries.isEmpty {
+                Text("No workouts yet")
+                    .font(.subheadline)
+                    .foregroundColor(.gray)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(viewModel.workoutSummaries) { summary in
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(summary.name)
+                                .font(.subheadline)
+                                .foregroundColor(.yellow)
+                            Text("Completed \(summary.timesCompleted) times")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                        Spacer()
+                        Text("\(summary.totalCalories) kcal")
+                            .font(.body)
+                            .foregroundColor(.orange)
+                    }
+                    .padding()
+                    .background(Color.gray.opacity(0.15))
+                    .cornerRadius(12)
+                }
+            }
+        }
+    }
+    
+    // MARK: - History Section
+    
+    private var historySection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("History")
+                .font(.headline)
+                .foregroundColor(.white)
+
+            if let err = viewModel.errorMessage {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Could not load history")
+                        .font(.subheadline)
+                        .foregroundColor(.orange)
+                    Text(err)
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                    HStack(spacing: 12) {
+                        if let url = urlFromError(err) {
+                            Button("Open link to create index") {
+                                UIApplication.shared.open(url)
+                            }
+                            .font(.subheadline)
+                            .foregroundColor(.yellow)
+                        }
+                        Button("Retry") { Task { await viewModel.load() } }
+                            .font(.subheadline)
+                            .foregroundColor(.yellow)
+                    }
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(12)
+            } else if viewModel.isLoading && viewModel.historyItems.isEmpty {
+                HStack(spacing: 8) {
+                    SwiftUI.ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .yellow))
+                    Text("Loading...")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 24)
+            } else if viewModel.historyItems.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("No history yet")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                    Text("Make sure you're signed in, then complete a workout and tap End Workout. It will appear here.")
+                        .font(.caption)
+                        .foregroundColor(.gray.opacity(0.9))
+                }
+                .padding(.vertical, 16)
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(viewModel.historyItems) { item in
+                        NavigationLink(destination: HistoryDetailView(item: item)) {
+                            HistoryRow(item: item)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Extracts a URL from an error message (e.g., Firestore index creation link).
     private func urlFromError(_ err: String) -> URL? {
         guard let start = err.range(of: "https://")?.lowerBound else { return nil }
         let rest = String(err[start...])
@@ -155,7 +187,9 @@ struct ProgressView: View {
     }
 }
 
-// MARK: - History list row
+// MARK: - History Row
+
+/// One row in the workout history list showing set title, date, calories, and duration.
 private struct HistoryRow: View {
     let item: WorkoutHistoryItem
 
@@ -192,14 +226,16 @@ private struct HistoryRow: View {
     }
 }
 
-// MARK: - Detail: แสดงแบบเดียวกับ Workout Summary (เวลา, แคล, รายการท่า)
+// MARK: - History Detail View
+
+/// Detailed view for a past workout session, showing per-exercise stats and errors.
 struct HistoryDetailView: View {
     let item: WorkoutHistoryItem
 
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 24) {
-                // หัว: เวลา + แคล (แบบ Workout Result)
+                // Header: time + calories
                 VStack(spacing: 12) {
                     HStack(spacing: 16) {
                         HStack(spacing: 8) {
@@ -254,14 +290,16 @@ struct HistoryDetailView: View {
     }
 }
 
-// MARK: - การ์ดหนึ่งท่า (รูปแบบเดียวกับ Workout Result)
+// MARK: - History Exercise Card
+
+/// Card showing detailed stats for one exercise in a past session.
 private struct HistoryExerciseCard: View {
     let exercise: ExerciseRecord
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
-                Image(systemName: iconName)
+                Image(systemName: "figure.strengthtraining.traditional")
                     .font(.title2)
                     .foregroundColor(.yellow)
                     .frame(width: 44, height: 44)
@@ -276,14 +314,19 @@ private struct HistoryExerciseCard: View {
 
             if exercise.type == "movement" {
                 if let correct = exercise.correctReps, let target = exercise.targetCorrectReps {
-                    progressBar(progress: target > 0 ? Double(correct) / Double(target) : 0)
+                    ProgressBarView(
+                        progress: target > 0 ? Double(correct) / Double(target) : 0,
+                        height: 6,
+                        fillColor: .yellow,
+                        trackColor: .white.opacity(0.12)
+                    )
                     Text("\(correct) / \(target) reps")
                         .font(.subheadline)
                         .fontWeight(.medium)
                         .foregroundColor(.white)
                 }
                 if let total = exercise.totalReps, total > 0, let inc = exercise.incorrectReps {
-                    Text("Total \(total) reps · \(inc) incorrect")
+                    Text("Total \(total) reps - \(inc) incorrect")
                         .font(.caption)
                         .foregroundColor(.gray)
                 }
@@ -299,7 +342,7 @@ private struct HistoryExerciseCard: View {
                             .foregroundColor(.gray.opacity(0.7))
                     } else {
                         ForEach(Array(exercise.mistakes.enumerated()), id: \.offset) { _, event in
-                            Text(mistakeTimelineText(event))
+                            Text(formatMistakeTimeline(event))
                                 .font(.subheadline)
                                 .foregroundColor(.orange.opacity(0.95))
                         }
@@ -307,7 +350,12 @@ private struct HistoryExerciseCard: View {
                 }
             } else {
                 if let dur = exercise.durationSeconds, let tgt = exercise.targetSeconds {
-                    progressBar(progress: tgt > 0 ? dur / tgt : 0)
+                    ProgressBarView(
+                        progress: tgt > 0 ? dur / tgt : 0,
+                        height: 6,
+                        fillColor: .yellow,
+                        trackColor: .white.opacity(0.12)
+                    )
                     Text("\(Int(dur)) sec / \(Int(tgt)) sec")
                         .font(.subheadline)
                         .fontWeight(.medium)
@@ -326,46 +374,22 @@ private struct HistoryExerciseCard: View {
                         .foregroundColor(.gray.opacity(0.7))
                 } else {
                     ForEach(Array(exercise.errors.enumerated()), id: \.offset) { _, e in
-                        Text("• \(e.reason) — \(e.count) times")
+                        Text("\u{2022} \(e.reason) — \(e.count) times")
                             .font(.subheadline)
                             .foregroundColor(.orange.opacity(0.95))
                     }
                 }
             }
-
         }
         .padding(16)
         .background(Color.white.opacity(0.06))
         .cornerRadius(16)
     }
 
-    private var iconName: String {
-        switch exercise.name.lowercased() {
-        case "wall-sit": return "figure.stand"
-        case "squat": return "figure.strengthtraining.traditional"
-        default: return "figure.strengthtraining.traditional"
-        }
-    }
-
-    private func progressBar(progress: Double) -> some View {
-        let p = min(1, max(0, progress))
-        return GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.white.opacity(0.12))
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.yellow)
-                    .frame(width: geo.size.width * p)
-            }
-        }
-        .frame(height: 6)
-        .frame(maxWidth: .infinity)
-    }
-
-    private func mistakeTimelineText(_ event: MistakeEventRecord) -> String {
+    private func formatMistakeTimeline(_ event: MistakeEventRecord) -> String {
         if let rep = event.repNumber {
-            return "• \(event.reason) — Rep \(rep)"
+            return "\u{2022} \(event.reason) — Rep \(rep)"
         }
-        return "• \(event.reason)"
+        return "\u{2022} \(event.reason)"
     }
 }

@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Profile editing screen with form fields for name, age, weight, height, and sign-out.
 struct EditProfileView: View {
     @ObservedObject var authService: AuthService
     @ObservedObject var profileService: ProfileService
@@ -98,6 +99,9 @@ struct EditProfileView: View {
     }
 }
 
+// MARK: - Profile Text Field
+
+/// Styled text field with a label, supporting both text and numeric keyboard types.
 fileprivate struct ProfileTextField: View {
     let title: String
     @Binding var text: String

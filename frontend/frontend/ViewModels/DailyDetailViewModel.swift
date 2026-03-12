@@ -1,11 +1,13 @@
 import Foundation
 import SwiftUI
 
+/// Provides mock data for the daily detail screen (placeholder until connected to real data).
 @MainActor
 final class DailyDetailViewModel: ObservableObject {
     let date: Date
     let workoutSets: [WorkoutSetSummary]
 
+    /// Total calories across all workout sets for this day.
     var totalCalories: Int {
         workoutSets.map { $0.totalCalories }.reduce(0, +)
     }
@@ -18,4 +20,3 @@ final class DailyDetailViewModel: ObservableObject {
         ]
     }
 }
-

@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-/// Loads workout history and derives the progress-screen aggregates from it.
+/// Loads workout history and derives progress-screen aggregates (calories chart, summaries).
 @MainActor
 final class ProgressViewModel: ObservableObject {
     @Published var isLoading = false
@@ -15,6 +15,7 @@ final class ProgressViewModel: ObservableObject {
 
     init() {}
 
+    /// Fetches sessions from Firestore and computes all derived display data.
     func load() async {
         isLoading = true
         errorMessage = nil
@@ -32,6 +33,7 @@ final class ProgressViewModel: ObservableObject {
         }
     }
 
+    /// Converts raw Firestore session tuples into display-ready history items.
     private func buildHistoryItems(
         from sessions: [(id: String, record: WorkoutSessionRecord)]
     ) -> [WorkoutHistoryItem] {
@@ -47,6 +49,7 @@ final class ProgressViewModel: ObservableObject {
         }
     }
 
+    /// Returns the start-of-day dates for the most recent N days.
     private func recentDays(count: Int) -> [Date] {
         let today = calendar.startOfDay(for: Date())
         return (0..<count).compactMap { offset in
@@ -54,10 +57,12 @@ final class ProgressViewModel: ObservableObject {
         }.reversed()
     }
 
+    /// Returns zero-calorie entries for the past 7 days (used as fallback).
     private func emptyCalorieStats() -> [DailyCalorie] {
         recentDays(count: 7).map { DailyCalorie(date: $0, calories: 0) }
     }
 
+    /// Aggregates calories per day for the weekly chart.
     private func computeCalorieStats() -> [DailyCalorie] {
         let days = recentDays(count: 7)
         var dayCalories: [Date: Int] = [:]
@@ -71,6 +76,7 @@ final class ProgressViewModel: ObservableObject {
         return days.map { DailyCalorie(date: $0, calories: dayCalories[$0] ?? 0) }
     }
 
+    /// Groups sessions by set title and computes summary statistics.
     private func computeWorkoutSummaries() -> [WorkoutSetSummary] {
         let grouped = Dictionary(grouping: historyItems, by: { $0.setTitle })
         return grouped.map { name, items in

@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Daily summary view redesigned to emphasize key health metrics
 struct DailyDetailView: View {
     @StateObject private var viewModel: DailyDetailViewModel
 
@@ -8,39 +9,74 @@ struct DailyDetailView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text(viewModel.date.formatted(.dateTime.weekday().month().day()))
-                .font(.title)
-                .foregroundColor(.white)
+        ZStack {
+            Color(white: 0.08).ignoresSafeArea()
 
-            Text("Total Burn: \(viewModel.totalCalories) kcal")
-                .font(.headline)
-                .foregroundColor(.orange)
-
-            Divider().background(Color.gray)
-
-            ForEach(viewModel.workoutSets) { set in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(set.name)
-                        .font(.headline)
-                        .foregroundColor(.yellow)
-                    Text("Completed \(set.timesCompleted) time(s)")
-                        .font(.subheadline)
-                        .foregroundColor(.gray)
-                    Text("Calories Burned: \(set.totalCalories) kcal")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
+            ScrollView {
+                VStack(spacing: 32) {
+                    heroMetricSection
+                    
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Completed Sets")
+                            .font(.title3.weight(.bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 20)
+                        
+                        LazyVStack(spacing: 12) {
+                            ForEach(viewModel.workoutSets) { set in
+                                workoutSetCard(set)
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                    }
                 }
-                .padding()
-                .background(Color.gray.opacity(0.2))
-                .cornerRadius(12)
+                .padding(.top, 24)
             }
-
-            Spacer()
         }
-        .padding()
-        .background(Color.black.edgesIgnoringSafeArea(.all))
-        .navigationTitle("Daily Summary")
+        .navigationTitle(viewModel.date.formatted(.dateTime.weekday().month().day()))
         .navigationBarTitleDisplayMode(.inline)
+    }
+    
+    private var heroMetricSection: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "flame.circle.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.orange, .orange.opacity(0.2))
+            
+            Text("\(viewModel.totalCalories)")
+                .font(.system(size: 64, weight: .heavy, design: .rounded))
+                .foregroundColor(.white)
+            
+            Text("Total Active Kilocalories")
+                .font(.headline)
+                .foregroundColor(.white.opacity(0.6))
+                .textCase(.uppercase)
+        }
+        .padding(.vertical, 32)
+        .frame(maxWidth: .infinity)
+        .background(Color.white.opacity(0.03))
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .padding(.horizontal, 20)
+    }
+    
+    private func workoutSetCard(_ set: WorkoutSetSummary) -> some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(set.name)
+                    .font(.headline.weight(.semibold))
+                    .foregroundColor(.white)
+                Text("\(set.timesCompleted) session\((set.timesCompleted == 1) ? "" : "s")")
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.6))
+            }
+            Spacer()
+            
+            Text("\(set.totalCalories) kcal")
+                .font(.headline.weight(.semibold))
+                .foregroundColor(.yellow)
+        }
+        .padding(16)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }

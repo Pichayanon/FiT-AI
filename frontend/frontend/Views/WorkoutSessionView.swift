@@ -1,19 +1,25 @@
 import SwiftUI
 
-// MARK: - Workout Session (Wall-sit -> show Squat preview 5s -> auto switch to Squat)
+// MARK: - Workout Session View
+
+/// Full-screen camera-based workout session with real-time backend feedback.
+///
+/// Displays a camera preview overlaid with a HUD (status pills, feedback text),
+/// exercise guide overlays, progress cards, and exercise preview countdowns.
+/// Timer publishers drive the isometric hold counters and idle detection.
 struct WorkoutSessionView: View {
     let setTitle: String
     @Environment(\.dismiss) private var dismiss
 
     @StateObject private var viewModel: WorkoutSessionViewModel
 
-    // ✅ Wall-sit hold timer
+    /// Wall-sit hold timer (0.1s interval for smooth progress bar updates).
     private let wallSitTick = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
 
-    // ✅ Squat idle timer (ยืนเฉยหลัง Stand OK)
+    /// Squat idle detection timer (checks if user is standing idle too long).
     private let squatIdleTick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
-    // ✅ Plank hold timer
+    /// Plank hold timer (0.1s interval).
     private let plankTick = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
 
     init(setTitle: String) {
@@ -27,23 +33,44 @@ struct WorkoutSessionView: View {
                 CameraPreviewView(session: viewModel.cameraManager.session)
                     .ignoresSafeArea()
 
-                Color.black.opacity(0.06).ignoresSafeArea()
+                // Top and Bottom gradient protection for maximum text readability against bright camera feeds
+                VStack {
+                    LinearGradient(colors: [.black.opacity(0.8), .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 160)
+                    Spacer()
+                    LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 380)
+                }
+                .ignoresSafeArea()
 
                 VStack {
                     TopHUD(
                         isSessionRunning: viewModel.isSessionRunning,
-                        backendState: viewModel.backendState,
-                        setTitle: viewModel.titleForHUD,
-                        feedback: viewModel.feedback
+                        setTitle: viewModel.titleForHUD
                     )
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 16)
                     .padding(.top, 8)
 
                     Spacer()
 
+                    // Massive Center Feedback Text
+                    if viewModel.isSessionRunning && !viewModel.feedback.isEmpty {
+                        Text(viewModel.feedback)
+                            .font(.system(size: 42, weight: .heavy, design: .rounded))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(3)
+                            .minimumScaleFactor(0.5)
+                            .shadow(color: .black.opacity(0.8), radius: 8, x: 0, y: 4)
+                            .padding(.horizontal, 24)
+                            .animation(.spring(), value: viewModel.feedback)
+                    }
+
+                    Spacer()
+
                     bottomPanel
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 10)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 16)
                 }
 
                 if !viewModel.isSessionRunning {
@@ -52,18 +79,25 @@ struct WorkoutSessionView: View {
                 }
 
                 if viewModel.showSquatPreview {
-                    squatPreviewOverlay
-                        .transition(.opacity)
+                    exercisePreviewOverlay(
+                        title: "Next: Squat\nStarting in \(viewModel.squatPreviewSeconds)s",
+                        guideContent: ExerciseGuideOverlay(
+                            frames: ["squat_01", "squat_02", "squat_03"],
+                            label: "Lower -> Hold -> Stand up"
+                        )
+                    )
+                    .transition(.opacity)
                 }
 
                 if viewModel.showPlankPreview {
-                    plankPreviewOverlay
-                        .transition(.opacity)
-                }
-
-                if showLightAdjustOverlay {
-                    lightAdjustOverlay
-                        .transition(.opacity)
+                    exercisePreviewOverlay(
+                        title: "Next: Plank\nStarting in \(viewModel.plankPreviewSeconds)s",
+                        guideContent: ExerciseGuideOverlay(
+                            frames: ["plank_01"],
+                            label: "Hold straight"
+                        )
+                    )
+                    .transition(.opacity)
                 }
             }
             .navigationBarBackButtonHidden(true)
@@ -84,7 +118,6 @@ struct WorkoutSessionView: View {
         .onChange(of: viewModel.feedback) { oldValue, newValue in
             viewModel.handleFeedbackChange()
         }
-        // ✅ นับเวลาเองตอน Hold (แก้ปัญหา backend DEDUP ส่ง result ไม่ถี่)
         .onReceive(wallSitTick) { _ in
             viewModel.handleWallSitTick()
         }
@@ -96,102 +129,67 @@ struct WorkoutSessionView: View {
         }
     }
 
-    // MARK: - Center Guide (first exercise is wall-sit)
+    // MARK: - Center Guide (shown before session starts)
+
     private var guideCenterOverlay: some View {
         VStack(spacing: 12) {
             currentGuideOverlay
 
-            Text("Set camera to SIDE VIEW\nPress Start when ready")
-                .font(.subheadline.weight(.semibold))
+                Text("Set camera to SIDE VIEW\nPress Start when ready")
+                    .font(.subheadline.weight(.bold))
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .background(Color.black.opacity(0.45))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                .background(.ultraThinMaterial)
+                .environment(\.colorScheme, .dark)
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 4)
         }
         .padding(.horizontal, 18)
         .offset(y: -40)
     }
 
-    // MARK: - Squat Preview Overlay
-    private var squatPreviewOverlay: some View {
-        previewOverlay(
-            title: "Next: Squat\nStarting in \(viewModel.squatPreviewSeconds)s"
-        ) {
-            SquatGuideOverlayCompact()
-        }
-    }
+    // MARK: - Exercise Preview Overlay
 
-    // MARK: - Plank Preview Overlay
-    private var plankPreviewOverlay: some View {
-        previewOverlay(
-            title: "Next: Plank\nStarting in \(viewModel.plankPreviewSeconds)s"
-        ) {
-            PlankGuideOverlayCompact()
-        }
-    }
-
-    // MARK: - Light adjust overlay (เมื่อ backend เตือนว่าแสงน้อย)
-    private var showLightAdjustOverlay: Bool {
-        let f = viewModel.feedback.lowercased()
-        return viewModel.isSessionRunning
-            && (f.contains("adjust") && (f.contains("light") || f.contains("lights")) || f.contains("too dark") || f.contains("dark"))
-    }
-
-    private var lightAdjustOverlay: some View {
+    /// Generic preview overlay shown during exercise transitions (countdown + guide).
+    private func exercisePreviewOverlay<Content: View>(
+        title: String,
+        guideContent: Content
+    ) -> some View {
         ZStack {
             Color.black.opacity(0.45).ignoresSafeArea()
 
-            VStack(spacing: 16) {
-                Image("light")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 280, maxHeight: 220)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            VStack(spacing: 12) {
+                guideContent
 
-                Text("Adjust your light")
-                    .font(.subheadline.weight(.semibold))
+                Text(title)
+                    .font(.headline.weight(.bold))
                     .foregroundColor(.white)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 20)
-                    .padding(.vertical, 12)
-                    .background(Color.black.opacity(0.45))
+                    .padding(.vertical, 14)
+                    .background(.ultraThinMaterial)
+                    .environment(\.colorScheme, .dark)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 4)
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 18)
             .offset(y: -40)
         }
     }
 
     // MARK: - Bottom Panel
+
     private var bottomPanel: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                statChip(title: "Total", value: viewModel.totalReps, tint: .white)
-                statChip(title: "Correct", value: viewModel.correctReps, tint: .green)
-                statChip(title: "Incorrect", value: viewModel.incorrectReps, tint: .red)
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                StatChip(title: "Total", value: viewModel.totalReps, tint: .white)
+                StatChip(title: "Correct", value: viewModel.correctReps, tint: .green)
+                StatChip(title: "Incorrect", value: viewModel.incorrectReps, tint: .red)
             }
 
             progressCard
-
-            if let err = viewModel.cameraManager.lastError {
-                Text("Error: \(err)")
-                    .font(.caption)
-                    .foregroundColor(.red)
-                    .padding(.top, 2)
-            }
-
-            if viewModel.showTestVoiceButton {
-                Button("Test Voice") {
-                    viewModel.speech.speak("This is a voice test", language: "en-US", minInterval: 0)
-                }
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity)
-                .background(Color.black.opacity(0.25))
-                .foregroundColor(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
 
             Button {
                 if viewModel.isSessionRunning {
@@ -200,97 +198,65 @@ struct WorkoutSessionView: View {
                     viewModel.startSession()
                 }
             } label: {
-                Text(viewModel.isSessionRunning ? "End Session" : "Start Session")
-                    .font(.headline)
+                Text(viewModel.isSessionRunning ? "End Workout" : "Start Workout")
+                    .font(.headline.weight(.bold))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .foregroundColor(.black)
-                    .background(viewModel.isSessionRunning ? Color.red : Color.green)
+                    .padding(.vertical, 16)
+                    .foregroundColor(viewModel.isSessionRunning ? .white : .black)
+                    .background(viewModel.isSessionRunning ? Color.red.gradient : Color.yellow.gradient)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .shadow(color: (viewModel.isSessionRunning ? Color.red : Color.yellow).opacity(0.3), radius: 10, x: 0, y: 5)
             }
         }
     }
 
+    // MARK: - Progress Cards
+
+    /// Selects the appropriate progress card for the current exercise mode.
     private var progressCard: some View {
         Group {
-            if viewModel.mode == .wallSit {
-                wallSitProgressCard
-            } else if viewModel.mode == .squat {
-                squatProgressCard
-            } else if viewModel.mode == .plank {
-                plankProgressCard
-            } else {
-                lungesProgressCard
+            switch viewModel.mode {
+            case .wallSit:
+                ExerciseProgressCard(
+                    title: wallSitTitleText,
+                    detail: wallSitDetailText,
+                    progress: viewModel.wallSitProgress01
+                )
+            case .squat:
+                ExerciseProgressCard(
+                    title: squatTitleText,
+                    detail: "\(viewModel.correctReps) / \(viewModel.squatTargetCorrectReps) correct",
+                    progress: viewModel.squatProgress01
+                )
+            case .plank:
+                ExerciseProgressCard(
+                    title: plankTitleText,
+                    detail: String(format: "%.1f", viewModel.plankCorrectSeconds) + " / " + String(format: "%.1f", viewModel.plankTargetSeconds) + " s",
+                    progress: viewModel.plankProgress01
+                )
+            case .lunges:
+                ExerciseProgressCard(
+                    title: "Lunges Goal",
+                    detail: "\(viewModel.correctReps) / \(viewModel.lungesTargetCorrectReps) correct",
+                    progress: viewModel.lungesProgress01
+                )
             }
         }
     }
 
-    @ViewBuilder
-    private var currentGuideOverlay: some View {
-        switch viewModel.mode {
-        case .wallSit:
-            WallSitGuideOverlayCompact()
-        case .squat:
-            SquatGuideOverlayCompact()
-        case .plank:
-            PlankGuideOverlayCompact()
-        case .lunges:
-            LungesGuideOverlayCompact()
-        }
+    // MARK: - Progress Card Title/Detail Helpers
+
+    private var wallSitTitleText: String {
+        if viewModel.passedWallSit { return "PASSED (Switch to Squat)" }
+        if viewModel.wallSitCountingActive { return "Hold Correct (5s)" }
+        return "Get In Position"
     }
 
-    private func previewOverlay<Content: View>(
-        title: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        ZStack {
-            Color.black.opacity(0.45).ignoresSafeArea()
-
-            VStack(spacing: 12) {
-                content()
-
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .background(Color.black.opacity(0.45))
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-            .padding(.horizontal, 18)
-            .offset(y: -40)
+    private var wallSitDetailText: String {
+        if viewModel.wallSitCountingActive {
+            return "\(String(format: "%.1f", viewModel.correctSeconds)) / \(String(format: "%.1f", viewModel.targetSeconds)) s"
         }
-    }
-
-    private var wallSitProgressCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(wallSitTitleText)
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.white)
-                Spacer()
-
-                if viewModel.wallSitCountingActive {
-                    Text("\(String(format: "%.1f", viewModel.correctSeconds)) / \(String(format: "%.1f", viewModel.targetSeconds)) s")
-                        .font(.caption2.weight(.bold))
-                        .foregroundColor(.white.opacity(0.9))
-                        .monospacedDigit()
-                } else {
-                    Text("\(viewModel.wallSitConsecutiveCorrect)")
-                        .font(.caption2.weight(.bold))
-                        .foregroundColor(.white.opacity(0.9))
-                        .monospacedDigit()
-                }
-            }
-
-            progressBar(viewModel.wallSitProgress01, height: 10)
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black.opacity(0.24))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        return "\(viewModel.wallSitConsecutiveCorrect)"
     }
 
     private var squatTitleText: String {
@@ -300,258 +266,85 @@ struct WorkoutSessionView: View {
         return "Squat Goal"
     }
 
-    private var wallSitTitleText: String {
-        if viewModel.passedWallSit { return "PASSED (Switch to Squat)" }
-        if viewModel.wallSitCountingActive { return "Hold Correct (5s)" }
-        return "Get In Position"
-    }
-
     private var plankTitleText: String {
         if viewModel.passedPlank { return "PASSED" }
         return "Plank Goal"
     }
 
-    private var squatProgressCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(squatTitleText)
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.white)
-                Spacer()
-                Text("\(viewModel.correctReps) / \(viewModel.squatTargetCorrectReps) correct")
-                    .font(.caption2.weight(.bold))
-                    .foregroundColor(.white.opacity(0.9))
-                    .monospacedDigit()
-            }
+    // MARK: - Guide Overlay Selection
 
-            progressBar(viewModel.squatProgress01, height: 10)
+    @ViewBuilder
+    private var currentGuideOverlay: some View {
+        switch viewModel.mode {
+        case .wallSit:
+            ExerciseGuideOverlay(
+                frames: ["wall_01", "wall_02", "wall_03"],
+                label: "Stand -> Lower -> Hold"
+            )
+        case .squat:
+            ExerciseGuideOverlay(
+                frames: ["squat_01", "squat_02", "squat_03"],
+                label: "Lower -> Hold -> Stand up"
+            )
+        case .plank:
+            ExerciseGuideOverlay(
+                frames: ["plank_01"],
+                label: "Hold straight"
+            )
+        case .lunges:
+            ExerciseGuideOverlay(
+                frames: ["squat_01", "squat_02"],
+                label: "Step forward -> Lower -> Push back"
+            )
         }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black.opacity(0.24))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
-
-    private var plankProgressCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(plankTitleText)
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.white)
-                Spacer()
-                Text(String(format: "%.1f", viewModel.plankCorrectSeconds) + " / " + String(format: "%.1f", viewModel.plankTargetSeconds) + " s")
-                    .font(.caption2.weight(.bold))
-                    .foregroundColor(.white.opacity(0.9))
-                    .monospacedDigit()
-            }
-
-            progressBar(viewModel.plankProgress01, height: 10)
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black.opacity(0.24))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    private var lungesProgressCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Lunges Goal")
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.white)
-                Spacer()
-                Text("\(viewModel.correctReps) / \(viewModel.lungesTargetCorrectReps) correct")
-                    .font(.caption2.weight(.bold))
-                    .foregroundColor(.white.opacity(0.9))
-                    .monospacedDigit()
-            }
-
-            progressBar(viewModel.lungesProgress01, height: 10)
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black.opacity(0.24))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    private func statChip(title: String, value: Int, tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption2)
-                .foregroundColor(.white.opacity(0.7))
-            Text("\(value)")
-                .font(.system(size: 22, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .foregroundColor(tint)
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black.opacity(0.24))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
 }
 
 // MARK: - Top HUD
+
+/// Status bar at the top showing the set title.
 private struct TopHUD: View {
     let isSessionRunning: Bool
-    let backendState: String
     let setTitle: String
-    let feedback: String
 
     var body: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 8) {
-                pill(text: isSessionRunning ? "Streaming" : "Preview",
-                     dot: isSessionRunning ? .green : .gray)
-                statePill(backendState)
-                Spacer()
-                Text(setTitle)
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.white.opacity(0.95))
-                    .lineLimit(1)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Color.black.opacity(0.30))
-                    .clipShape(Capsule())
-            }
-
-            HStack(spacing: 8) {
-                Text("Live")
-                    .font(.caption2.weight(.bold))
-                    .foregroundColor(.white.opacity(0.9))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Color.black.opacity(0.28))
-                    .clipShape(Capsule())
-
-                Text(feedback)
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .background(Color.black.opacity(0.22))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    private func pill(text: String, dot: Color) -> some View {
-        HStack(spacing: 6) {
-            Circle().fill(dot).frame(width: 8, height: 8)
-            Text(text).font(.caption.weight(.semibold)).foregroundColor(.white)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(Color.black.opacity(0.32))
-        .clipShape(Capsule())
-    }
-
-    private func statePill(_ state: String) -> some View {
-        Text(state.uppercased())
-            .font(.caption2.weight(.bold))
-            .foregroundColor(.white.opacity(0.95))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(Color.black.opacity(0.28))
-            .clipShape(Capsule())
-    }
-}
-
-// MARK: - Guide Overlay Compact (Wall-Sit) — Stand → Lower → Hold
-private struct WallSitGuideOverlayCompact: View {
-    private let frames = ["wall_01", "wall_02", "wall_03"]
-
-    var body: some View {
-        TimelineView(.periodic(from: Date(), by: 1.1)) { context in
-            let idx = Int(context.date.timeIntervalSince1970 / 1.1) % frames.count
-            VStack(spacing: 10) {
-                Image(frames[idx])
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 260, maxHeight: 200)
-                    .shadow(radius: 10)
-                    .animation(.easeInOut(duration: 0.2), value: idx)
-
-                Text("Stand → Lower → Hold")
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.black.opacity(0.45))
-                    .clipShape(Capsule())
-            }
-        }
-    }
-}
-
-// MARK: - Guide Overlay Compact (Squat) — ย่อ → หยุด → ขึ้น
-private struct SquatGuideOverlayCompact: View {
-    private let frames = ["squat_01", "squat_02", "squat_03"]
-
-    var body: some View {
-        TimelineView(.periodic(from: Date(), by: 1.1)) { context in
-            let idx = Int(context.date.timeIntervalSince1970 / 1.1) % frames.count
-            VStack(spacing: 10) {
-                Image(frames[idx])
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 260, maxHeight: 200)
-                    .shadow(radius: 10)
-                    .animation(.easeInOut(duration: 0.2), value: idx)
-
-                Text("Lower → Hold → Stand up")
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.black.opacity(0.45))
-                    .clipShape(Capsule())
-            }
-        }
-    }
-}
-
-// MARK: - Guide Overlay Compact (Plank)
-private struct PlankGuideOverlayCompact: View {
-    var body: some View {
-        VStack(spacing: 10) {
-            Image("plank_01")
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: 260, maxHeight: 200)
-                .shadow(radius: 10)
-
-            Text("Hold straight")
-                .font(.caption.weight(.semibold))
+        HStack {
+            Spacer()
+            Text(setTitle)
+                .font(.subheadline.weight(.semibold))
                 .foregroundColor(.white)
-                .padding(.horizontal, 12)
+                .lineLimit(1)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                .background(Color.black.opacity(0.45))
+                .background(.ultraThinMaterial)
+                .environment(\.colorScheme, .dark)
                 .clipShape(Capsule())
         }
     }
 }
 
-// MARK: - Guide Overlay Compact (Lunges)
-private struct LungesGuideOverlayCompact: View {
-    // Assuming you might add lunge images later, for now using a placeholder or squat images if unavailable
-    private let frames = ["squat_01", "squat_02"] // Placeholder: Replace with lunge images if available
+// MARK: - Exercise Guide Overlay
+
+/// Animated exercise guide that cycles through demonstration frames with a text label.
+/// Used both in the pre-session overlay and in exercise transition previews.
+///
+/// For single-frame exercises (e.g., plank), displays a static image without animation.
+private struct ExerciseGuideOverlay: View {
+    let frames: [String]
+    let label: String
 
     var body: some View {
+        if frames.count > 1 {
+            animatedContent
+        } else {
+            staticContent
+        }
+    }
+
+    private var animatedContent: some View {
         TimelineView(.periodic(from: Date(), by: 1.1)) { context in
             let idx = Int(context.date.timeIntervalSince1970 / 1.1) % frames.count
             VStack(spacing: 10) {
-                // If you have lunge images, use them here. Otherwise re-using squat as placeholder or just text.
-                // Ideally: Image("lunge_01") etc.
                 Image(frames[idx])
                     .resizable()
                     .scaledToFit()
@@ -559,30 +352,115 @@ private struct LungesGuideOverlayCompact: View {
                     .shadow(radius: 10)
                     .animation(.easeInOut(duration: 0.2), value: idx)
 
-                Text("Step forward → Lower → Push back")
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.black.opacity(0.45))
-                    .clipShape(Capsule())
+                guideLabel
             }
         }
     }
-}
 
-// MARK: - Custom Progress Bar
-private func progressBar(_ progress: Double, height: CGFloat = 10) -> some View {
-    GeometryReader { geo in
-        ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: height)
-                .fill(Color.white.opacity(0.25))
+    private var staticContent: some View {
+        VStack(spacing: 10) {
+            Image(frames.first ?? "")
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: 260, maxHeight: 200)
+                .shadow(radius: 10)
 
-            RoundedRectangle(cornerRadius: height)
-                .fill(progress >= 1.0 ? Color.green : Color.white)
-                .frame(width: max(0, geo.size.width * CGFloat(min(progress, 1.0))))
-                .animation(.easeInOut(duration: 0.25), value: progress)
+            guideLabel
         }
     }
-    .frame(height: height)
+
+    private var guideLabel: some View {
+        Text(label)
+            .font(.caption.weight(.semibold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.black.opacity(0.45))
+            .clipShape(Capsule())
+    }
+}
+
+// MARK: - Stat Chip
+
+/// Small rounded chip displaying a labeled numeric value (e.g., "Total: 5").
+private struct StatChip: View {
+    let title: String
+    let value: Int
+    let tint: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundColor(.white.opacity(0.7))
+            Text("\(value)")
+                .font(.system(size: 26, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .foregroundColor(tint)
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .environment(\.colorScheme, .dark)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
+// MARK: - Exercise Progress Card
+
+/// Card showing exercise title, detail text, and a progress bar.
+/// Shared across all exercise modes (wall-sit, squat, plank, lunges).
+private struct ExerciseProgressCard: View {
+    let title: String
+    let detail: String
+    let progress: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(title)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundColor(.white)
+                Spacer()
+                Text(detail)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundColor(.white.opacity(0.95))
+                    .monospacedDigit()
+            }
+
+            ProgressBarView(progress: progress, height: 12, fillColor: progress >= 1.0 ? .green : .yellow)
+        }
+        .padding(.vertical, 14)
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .environment(\.colorScheme, .dark)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
+// MARK: - Shared Progress Bar
+
+/// Reusable animated progress bar used across session, result, and history views.
+struct ProgressBarView: View {
+    let progress: Double
+    var height: CGFloat = 10
+    var fillColor: Color = .yellow
+    var trackColor: Color = .white.opacity(0.25)
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: height)
+                    .fill(trackColor)
+
+                RoundedRectangle(cornerRadius: height)
+                    .fill(fillColor)
+                    .frame(width: max(0, geo.size.width * CGFloat(min(max(0, progress), 1.0))))
+                    .animation(.easeInOut(duration: 0.25), value: progress)
+            }
+        }
+        .frame(height: height)
+    }
 }

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 
+/// Manages form state for the edit profile screen and handles save operations.
 @MainActor
 final class EditProfileViewModel: ObservableObject {
     @Published var name: String = ""
@@ -15,7 +16,7 @@ final class EditProfileViewModel: ObservableObject {
         fillFromProfile(profileService.currentProfile)
     }
 
-    /// โหลดค่าจากโปรไฟล์ (เรียกเมื่อเปิดหน้าหรือเมื่อ profile เปลี่ยน)
+    /// Populates form fields from an existing profile, or clears them if nil.
     func fillFromProfile(_ profile: UserProfile?) {
         guard let p = profile else {
             name = ""
@@ -30,7 +31,7 @@ final class EditProfileViewModel: ObservableObject {
         height = p.height
     }
 
-    /// บันทึกลง Firestore
+    /// Saves the current form values to Firestore via the profile service.
     func save() async {
         let profile = UserProfile(name: name, age: age, weight: weight, height: height)
         await profileService.save(profile)
