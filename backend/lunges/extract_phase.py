@@ -34,6 +34,9 @@ IMPORTANT_LANDMARKS = {
     "r_foot": 32,
 }
 
+# Keep this consistent with extract_features() output length.
+FEATURE_DIM = 6
+
 
 # -----------------------------
 # Geometry Helpers
@@ -56,7 +59,7 @@ def angle_2d(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
 # -----------------------------
 
 
-def extract_features(lm, prev_hip_y=None):
+def extract_features(lm, prev_vals=None):
 
     pts = {}
 
@@ -69,6 +72,7 @@ def extract_features(lm, prev_hip_y=None):
 
     mid_hip = (pts["l_hip"] + pts["r_hip"]) / 2
     mid_shoulder = (pts["l_shoulder"] + pts["r_shoulder"]) / 2
+    mid_knee = (pts["l_knee"] + pts["r_knee"]) / 2
 
     torso_len = abs(mid_shoulder[1] - mid_hip[1]) + 1e-6
 
@@ -76,97 +80,25 @@ def extract_features(lm, prev_hip_y=None):
         return (p[1] - mid_hip[1]) / torso_len
 
     # -------------------------
-    # Knee angles
+    # Heights
     # -------------------------
 
-    l_knee_angle = angle_2d(
-        pts["l_hip"],
-        pts["l_knee"],
-        pts["l_ankle"],
-    )
-
-    r_knee_angle = angle_2d(
-        pts["r_hip"],
-        pts["r_knee"],
-        pts["r_ankle"],
-    )
+    hip_h = ny(mid_hip)
+    shoulder_h = ny(mid_shoulder)
+    knee_h = ny(mid_knee)
 
     # -------------------------
-    # Detect front leg
+    # Velocities
     # -------------------------
 
-    if pts["l_ankle"][0] > pts["r_ankle"][0]:
-
-        front_knee_angle = l_knee_angle
-        back_knee_angle = r_knee_angle
-
-        front_knee = pts["l_knee"]
-        front_ankle = pts["l_ankle"]
-
+    if prev_vals is None:
+        hip_v = 0.0
+        shoulder_v = 0.0
+        knee_v = 0.0
     else:
-
-        front_knee_angle = r_knee_angle
-        back_knee_angle = l_knee_angle
-
-        front_knee = pts["r_knee"]
-        front_ankle = pts["r_ankle"]
-
-    # -------------------------
-    # Step length
-    # -------------------------
-
-    step_length = abs(
-        pts["l_ankle"][0] - pts["r_ankle"][0]
-    ) / torso_len
-
-    # -------------------------
-    # Knee forward travel
-    # -------------------------
-
-    knee_forward = (
-        front_knee[0] - front_ankle[0]
-    ) / torso_len
-
-    # -------------------------
-    # Hip height
-    # -------------------------
-
-    hip_y = mid_hip[1]
-
-    hip_height_norm = ny(mid_hip)
-
-    # -------------------------
-    # Hip velocity
-    # -------------------------
-
-    if prev_hip_y is None:
-        hip_velocity = 0.0
-    else:
-        hip_velocity = (hip_y - prev_hip_y) / torso_len
-
-    # -------------------------
-    # Torso lean
-    # -------------------------
-
-    torso_angle = angle_2d(
-        mid_shoulder,
-        mid_hip,
-        front_knee,
-    )
-
-    # -------------------------
-    # Shoulder height
-    # -------------------------
-
-    shoulder_height = ny(mid_shoulder)
-
-    # -------------------------
-    # Knee asymmetry
-    # -------------------------
-
-    knee_angle_diff = abs(
-        l_knee_angle - r_knee_angle
-    )
+        hip_v = hip_h - prev_vals[0]
+        shoulder_v = shoulder_h - prev_vals[1]
+        knee_v = knee_h - prev_vals[2]
 
     # -------------------------
     # Feature vector
@@ -174,20 +106,17 @@ def extract_features(lm, prev_hip_y=None):
 
     features = np.array(
         [
-            hip_height_norm,
-            shoulder_height,
-            front_knee_angle / 180.0,
-            back_knee_angle / 180.0,
-            knee_angle_diff / 180.0,
-            step_length,
-            knee_forward,
-            torso_angle / 180.0,
-            hip_velocity,
+            hip_h,
+            shoulder_h,
+            knee_h,
+            hip_v,
+            shoulder_v,
+            knee_v,
         ],
         dtype=np.float32,
     )
 
-    return features, hip_y
+    return features, (hip_h, shoulder_h, knee_h)
 
 
 # -----------------------------
@@ -303,7 +232,7 @@ def main():
     labels_seq = []
     mask_seq = []
 
-    prev_hip_y = None
+    prev_vals = None
 
     with mp_pose.Pose(
         static_image_mode=False,
@@ -332,9 +261,9 @@ def main():
 
             if res.pose_landmarks:
 
-                feats, prev_hip_y = extract_features(
+                feats, prev_vals = extract_features(
                     res.pose_landmarks.landmark,
-                    prev_hip_y,
+                    prev_vals,
                 )
 
                 mask = 1
@@ -347,7 +276,7 @@ def main():
 
             else:
 
-                feats = np.zeros((9,), dtype=np.float32)
+                feats = np.zeros((FEATURE_DIM,), dtype=np.float32)
                 mask = 0
 
             features_seq.append(feats)

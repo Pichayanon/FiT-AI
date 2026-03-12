@@ -1,41 +1,32 @@
 """
-wall_sit_streaming_oop.py (NO OVERLAY / NO RECORDING) - OOP VERSION
+wall_sit_streaming.py — Wall Sit posture analysis streaming backend.
 
-Streaming (WebSocket) + SIDE-VIEW gate (one side only)
-+ PRINT logs + Status to iOS
-+ (Optional) DEDUP RULE: Send {"type":"result"} ONLY when prediction label changes
+WebSocket streaming server for real-time wall sit form assessment using
+side-view pose detection and sklearn-based classification.
 
-PHASE (status.state) to iOS:
-  - NO_POSE
-  - HAVE_POSE
-  - BUFFERING
-  - INFERENCING
-
-Run:
-  python wall_sit_streaming_oop.py --serve
+Phases sent to iOS:
+    NO_POSE, HAVE_POSE, BUFFERING, INFERENCING
 
 WS protocol (from iOS):
-  - {"type":"start"}
-  - {"type":"frame","jpeg_b64":"..."}
-  - {"type":"stop"}
+    {"type":"start"}
+    {"type":"frame","jpeg_b64":"..."}
+    {"type":"stop"}
 
 Server -> iOS:
-  - {"type":"status","state":"NO_POSE|HAVE_POSE|BUFFERING|INFERENCING", ...}
-  - {"type":"result","prediction":"...", "confidence":..., ...}
-  - {"type":"info","message":"..."}  (optional)
+    {"type":"status","state":"NO_POSE|HAVE_POSE|BUFFERING|INFERENCING", ...}
+    {"type":"result","prediction":"...", "confidence":..., ...}
+    {"type":"info","message":"..."}
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
-
-import warnings
 
 warnings.filterwarnings(
     "ignore",
@@ -45,17 +36,25 @@ warnings.filterwarnings(
 )
 
 import cv2
-import joblib
 import mediapipe as mp
 import numpy as np
-from typing import List, Tuple
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from shared.frame_decoder import FrameDecoder
+from shared.frame_quality import FrameQuality
+from shared.json_utils import parse_json
+from shared.math_utils import angle_3pts
+from shared.sklearn_model_service import SklearnModelService
+from shared.side_gate import SideGate
+from shared.label_mapper import LabelMapper
+from shared.status_sender import StatusSender
 
-# -----------------------------
-# Config
-# -----------------------------
+
+# ---------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------
+
 MODEL_PATH = "wall_sit/models/wall_sit_model.pkl"
 
 LABELS: Dict[int, str] = {
@@ -66,47 +65,47 @@ LABELS: Dict[int, str] = {
     4: "not_deep_enough",
 }
 
-
-WINDOW_FRAMES = 15          # frames per window
-READY_STREAK_N = 3          # require side landmarks N consecutive frames
+WINDOW_FRAMES = 15          # frames per inference window
+READY_STREAK_N = 3          # consecutive side-view frames required
 VIS_TH = 0.80               # side landmark visibility threshold
 
 DEBUG = True
 
-# MediaPipe confidence
+# MediaPipe confidence thresholds
 MP_MIN_DET_CONF = 0.80
 MP_MIN_TRACK_CONF = 0.80
 
-# Status to iOS (throttle)
+# Status message throttle
 STATUS_SEND_EVERY_N_FRAMES = 3
 
-# Choose side mode: "auto" | "left" | "right"
+# Side selection: "auto" | "left" | "right"
 SIDE_MODE = "auto"
 
-# Status phases
+# Status phase constants
 PHASE_NO_POSE = "NO_POSE"
 PHASE_HAVE_POSE = "HAVE_POSE"
 PHASE_BUFFERING = "BUFFERING"
 PHASE_INFERENCING = "INFERENCING"
 
-# NO_POSE watchdog seconds
+# NO_POSE watchdog: alert after this many seconds of no pose
 NO_POSE_ADJUST_SECONDS = 5.0
 
-# DARK watchdog (check before NO_POSE message)
+# DARK watchdog: alert after this many seconds of dark frames
 DARK_ADJUST_SECONDS = 5.0
-# Mean grayscale brightness threshold (0..255). Lower = darker.
+# Mean grayscale brightness threshold (0..255)
 DARK_BRIGHTNESS_TH = 55.0
 
-# Standing gate (avoid predicting while user stands upright)
-# knee_angle ~ 165–180° => standing (not in wall-sit yet)
+# Standing gate: avoid predicting while user stands upright
+# knee_angle ~ 165-180 degrees = standing (not in wall-sit yet)
 STAND_KNEE_ANGLE_DEG_TH = 165.0
 STAND_STREAK_N = 3
 
 
-# -----------------------------
-# App
-# -----------------------------
-app = FastAPI(title="FiT-AI WallSit Streaming Backend (OOP)")
+# ---------------------------------------------------------------
+# FastAPI Application
+# ---------------------------------------------------------------
+
+app = FastAPI(title="FiT-AI WallSit Streaming Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -117,225 +116,83 @@ app.add_middleware(
 )
 
 
-# -----------------------------
-# Stream State
-# -----------------------------
+# ---------------------------------------------------------------
+# Wall Sit Stream State
+# ---------------------------------------------------------------
+
 @dataclass
 class StreamState:
+    """Session-level state for a wall sit streaming WebSocket connection."""
+
     started: bool = False
     foot_wall_vals: List[Tuple[float, float, float]] = field(default_factory=list)
     stand_streak: int = 0
 
-    # gate
+    # Gate
     ready: bool = False
     ready_streak: int = 0
     chosen_side: Optional[str] = None
 
-    # session
+    # Session metadata
     session_id: str = ""
 
-    # status throttle
+    # Status throttle
     last_status: str = ""
     status_tick: int = 0
 
-    # last prediction (for memory/logs)
+    # Last prediction (for logs/debugging)
     last_pred_label: str = ""
     last_pred_conf: Optional[float] = None
 
-    # last sent (for optional dedup)
+    # Last sent (for optional deduplication)
     last_sent_label: str = ""
     last_sent_conf: Optional[float] = None
 
-    # frame count (misc)
+    # Frame counter
     frame_count: int = 0
 
     # NO_POSE watchdog
     no_pose_since: Optional[float] = None
     no_pose_alerted: bool = False
 
-    # DARK watchdog (only meaningful when NO_POSE)
+    # DARK watchdog
     dark_since: Optional[float] = None
     dark_alerted: bool = False
 
 
-# -----------------------------
-# Helper Services
-# -----------------------------
-class ModelService:
-    """Loads a sklearn-like model via joblib and provides predict + proba."""
+# ---------------------------------------------------------------
+# Wall Sit Feature Extractor
+# ---------------------------------------------------------------
 
-    def __init__(self, model_path: str) -> None:
-        self.model_path = model_path
-        self.model = self._load()
+class WallSitFeatureExtractor:
+    """Extract per-frame and window-level features for the wall sit model.
 
-    def _load(self) -> Any:
-        try:
-            m = joblib.load(self.model_path)
-            print(f"[MODEL] Loaded: {self.model_path}")
-            return m
-        except Exception as e:
-            print(f"[MODEL] Cannot load model: {e}")
-            return None
-
-    @property
-    def loaded(self) -> bool:
-        return self.model is not None
-
-    def predict(self, feat: np.ndarray) -> Tuple[int, Optional[float]]:
-        """Return (pred_id, confidence or None)."""
-        if self.model is None:
-            return 0, None
-
-        pred = int(self.model.predict(feat.reshape(1, -1))[0])
-        conf: Optional[float] = None
-        if hasattr(self.model, "predict_proba"):
-            conf = float(self.model.predict_proba(feat.reshape(1, -1))[0][pred])
-        return pred, conf
-
-
-class FrameDecoder:
-    """Decode base64 jpeg string into BGR image."""
-
-    @staticmethod
-    def decode_jpeg_base64(jpeg_b64: str) -> Optional[np.ndarray]:
-        try:
-            raw = base64.b64decode(jpeg_b64)
-            arr = np.frombuffer(raw, np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            return img
-        except Exception:
-            return None
-
-
-class FrameQuality:
-    """Cheap frame quality checks (brightness)."""
-
-    @staticmethod
-    def compute_brightness_mean_bgr(frame_bgr: np.ndarray) -> float:
-        """
-        Return mean grayscale brightness in range 0..255.
-        """
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        return float(np.mean(gray))
-
-    @staticmethod
-    def is_too_dark(frame_bgr: np.ndarray, th: float) -> Tuple[bool, float]:
-        mean_v = FrameQuality.compute_brightness_mean_bgr(frame_bgr)
-        return (mean_v < float(th)), mean_v
-
-
-class LabelMapper:
-    """Map class index -> label string."""
-
-    def __init__(self, labels: Dict[int, str]) -> None:
-        self.labels = labels
-
-    def label_of(self, pred_id: int) -> str:
-        return self.labels.get(int(pred_id), str(pred_id))
-
-
-class SideGate:
-    """Side-view gate: chooses a side and checks landmark visibility."""
-
-    def __init__(self, mp_pose: Any, side_mode: str, vis_th: float) -> None:
-        self.mp_pose = mp_pose
-        self.side_mode = side_mode
-        self.vis_th = vis_th
-
-        self.SIDE_LM: Dict[str, List[int]] = {
-            "left": [
-                mp_pose.PoseLandmark.LEFT_SHOULDER,
-                mp_pose.PoseLandmark.LEFT_HIP,
-                mp_pose.PoseLandmark.LEFT_KNEE,
-                mp_pose.PoseLandmark.LEFT_ANKLE,
-                mp_pose.PoseLandmark.LEFT_FOOT_INDEX,
-            ],
-            "right": [
-                mp_pose.PoseLandmark.RIGHT_SHOULDER,
-                mp_pose.PoseLandmark.RIGHT_HIP,
-                mp_pose.PoseLandmark.RIGHT_KNEE,
-                mp_pose.PoseLandmark.RIGHT_ANKLE,
-                mp_pose.PoseLandmark.RIGHT_FOOT_INDEX,
-            ],
-        }
-
-        self.REQ_LM_LABELS: Dict[int, str] = {
-            mp_pose.PoseLandmark.LEFT_SHOULDER: "L_SHO",
-            mp_pose.PoseLandmark.LEFT_HIP: "L_HIP",
-            mp_pose.PoseLandmark.LEFT_KNEE: "L_KNEE",
-            mp_pose.PoseLandmark.LEFT_ANKLE: "L_ANK",
-            mp_pose.PoseLandmark.LEFT_FOOT_INDEX: "L_FOOT",
-            mp_pose.PoseLandmark.RIGHT_SHOULDER: "R_SHO",
-            mp_pose.PoseLandmark.RIGHT_HIP: "R_HIP",
-            mp_pose.PoseLandmark.RIGHT_KNEE: "R_KNEE",
-            mp_pose.PoseLandmark.RIGHT_ANKLE: "R_ANK",
-            mp_pose.PoseLandmark.RIGHT_FOOT_INDEX: "R_FOOT",
-        }
-
-    def side_score(self, lm: List[Any], side: str) -> Tuple[bool, float, Dict[str, float]]:
-        """ok = all side landmarks visibility >= vis_th"""
-        vis_map: Dict[str, float] = {}
-        ok = True
-        vis_sum = 0.0
-
-        for idx in self.SIDE_LM[side]:
-            v = float(lm[idx].visibility)
-            vis_map[self.REQ_LM_LABELS.get(idx, str(idx))] = v
-            vis_sum += v
-            if v < self.vis_th:
-                ok = False
-
-        avg = vis_sum / max(1, len(self.SIDE_LM[side]))
-        return ok, avg, vis_map
-
-    def choose_best_side(self, lm: List[Any]) -> Tuple[Optional[str], Dict[str, Any]]:
-        left_ok, left_avg, left_map = self.side_score(lm, "left")
-        right_ok, right_avg, right_map = self.side_score(lm, "right")
-
-        debug: Dict[str, Any] = {
-            "left_ok": left_ok,
-            "left_avg": round(left_avg, 3),
-            "left_vis": left_map,
-            "right_ok": right_ok,
-            "right_avg": round(right_avg, 3),
-            "right_vis": right_map,
-            "mode": self.side_mode,
-            "vis_th": self.vis_th,
-        }
-
-        if self.side_mode == "left":
-            return ("left" if left_ok else None), debug
-        if self.side_mode == "right":
-            return ("right" if right_ok else None), debug
-
-        # auto
-        if left_ok and not right_ok:
-            return "left", debug
-        if right_ok and not left_ok:
-            return "right", debug
-        if left_ok and right_ok:
-            return ("left" if left_avg >= right_avg else "right"), debug
-
-        return None, debug
-
-
-class FeatureExtractor:
-    """Extract per-frame features used by the 5-class model."""
+    Per-frame feature tuple:
+        (foot_wall_norm, knee_angle, torso_alignment)
+    Window-level aggregate feature (5-D):
+        mean_fw, std_fw, mean_knee, min_knee, mean_torso
+    """
 
     def __init__(self, mp_pose: Any) -> None:
         self.mp_pose = mp_pose
 
     @staticmethod
-    def angle(a, b, c):
-        a, b, c = np.array(a), np.array(b), np.array(c)
-        ba, bc = a - b, c - b
-        cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
-        return np.degrees(np.arccos(np.clip(cos, -1, 1)))
+    def _angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+        """Compute angle ABC (degrees) from 2D points."""
+        return angle_3pts(a, b, c)
 
-    def extract_features(self, res: Any, side: str) -> Optional[Tuple[float, float, float]]:
-        """
+    def extract_features(
+        self, res: Any, side: str
+    ) -> Optional[Tuple[float, float, float]]:
+        """Extract per-frame feature tuple for wall sit.
+
+        Args:
+            res: MediaPipe pose result.
+            side: "left" or "right".
+
         Returns:
-        (foot_wall_norm, knee_angle, torso_alignment)
+            Tuple of (foot_wall_norm, knee_angle, torso_alignment),
+            or None if landmarks are missing.
         """
         if not res.pose_landmarks:
             return None
@@ -353,37 +210,31 @@ class FeatureExtractor:
             ankle = self.mp_pose.PoseLandmark.LEFT_ANKLE
             shoulder = self.mp_pose.PoseLandmark.LEFT_SHOULDER
 
-        # Foot-wall
+        # Foot-wall distance normalized by shoulder width
         shoulder_width = abs(
             lm[self.mp_pose.PoseLandmark.LEFT_SHOULDER].x
             - lm[self.mp_pose.PoseLandmark.RIGHT_SHOULDER].x
         ) + 1e-6
-
         foot_wall = abs(lm[ankle].x - lm[hip].x) / shoulder_width
 
-        # Knee angle
-        knee_angle = self.angle(
+        # Knee angle (hip-knee-ankle)
+        knee_angle = self._angle(
             [lm[hip].x, lm[hip].y],
             [lm[knee].x, lm[knee].y],
             [lm[ankle].x, lm[ankle].y],
         )
 
-        # Torso alignment
+        # Torso alignment (shoulder-hip horizontal distance)
         torso_alignment = abs(lm[shoulder].x - lm[hip].x)
 
         return float(foot_wall), float(knee_angle), float(torso_alignment)
 
     @staticmethod
     def aggregate_window(vals: List[Tuple[float, float, float]]) -> np.ndarray:
-        """
-        Aggregate window into final feature vector:
-        [
-            mean_fw,
-            std_fw,
-            mean_knee,
-            min_knee,
-            mean_torso
-        ]
+        """Aggregate a window of per-frame tuples into a 5-D feature vector.
+
+        Returns:
+            Array of [mean_fw, std_fw, mean_knee, min_knee, mean_torso].
         """
         fw = [v[0] for v in vals]
         knee = [v[1] for v in vals]
@@ -398,51 +249,24 @@ class FeatureExtractor:
         ], dtype=np.float32)
 
 
+# ---------------------------------------------------------------
+# Wall Sit WebSocket Session
+# ---------------------------------------------------------------
 
-class StatusSender:
-    """Send throttled status PHASE to iOS."""
-
-    def __init__(self, every_n_frames: int) -> None:
-        self.every_n_frames = max(1, int(every_n_frames))
-
-    async def send_info(self, websocket: WebSocket, msg: str, extra: Optional[Dict[str, Any]] = None) -> None:
-        payload: Dict[str, Any] = {"type": "info", "message": msg}
-        if extra:
-            payload.update(extra)
-        await websocket.send_text(json.dumps(payload))
-
-    async def send_status(
-        self,
-        websocket: WebSocket,
-        st: StreamState,
-        state: str,
-        extra: Optional[Dict[str, Any]] = None,
-        force: bool = False,
-    ) -> None:
-        st.status_tick += 1
-
-        if not force:
-            if (st.status_tick % self.every_n_frames != 0) and (state == st.last_status):
-                return
-
-        payload: Dict[str, Any] = {"type": "status", "state": state, "session_id": st.session_id}
-        if extra:
-            payload.update(extra)
-
-        st.last_status = state
-        await websocket.send_text(json.dumps(payload))
-
-
-# -----------------------------
-# Session Handler (OOP)
-# -----------------------------
 class WallSitWebSocketSession:
+    """Handle a single wall sit WebSocket streaming session.
+
+    Orchestrates: frame decoding, quality checks, pose detection,
+    side-view gating, standing gate, feature extraction, buffering,
+    inference, and result sending.
+    """
+
     def __init__(
         self,
         websocket: WebSocket,
-        model_svc: ModelService,
+        model_svc: SklearnModelService,
         gate: SideGate,
-        feat: FeatureExtractor,
+        feat: WallSitFeatureExtractor,
         labels: LabelMapper,
         status: StatusSender,
         window_frames: int,
@@ -470,19 +294,34 @@ class WallSitWebSocketSession:
             min_tracking_confidence=MP_MIN_TRACK_CONF,
         )
 
+    # ---------------------------------------------------------------
+    # Main loop
+    # ---------------------------------------------------------------
+
     async def run(self) -> None:
+        """Main receive loop for the WebSocket session."""
         await self.ws.accept()
         await self.status.send_info(self.ws, "WebSocket connected")
 
-        print(f"[BOOT] side_mode={SIDE_MODE} VIS_TH={VIS_TH} det={MP_MIN_DET_CONF} track={MP_MIN_TRACK_CONF}")
-        print(f"[BOOT] WINDOW_FRAMES={self.window_frames} READY_STREAK_N={self.ready_streak_n}")
+        print(
+            f"[BOOT] side_mode={SIDE_MODE} VIS_TH={VIS_TH} "
+            f"det={MP_MIN_DET_CONF} track={MP_MIN_TRACK_CONF}"
+        )
+        print(
+            f"[BOOT] WINDOW_FRAMES={self.window_frames} "
+            f"READY_STREAK_N={self.ready_streak_n}"
+        )
         if not self.model_svc.loaded:
-            await self.status.send_info(self.ws, "Model not loaded (check MODEL_PATH)", {"model_path": MODEL_PATH})
+            await self.status.send_info(
+                self.ws,
+                "Model not loaded (check MODEL_PATH)",
+                {"model_path": MODEL_PATH},
+            )
 
         try:
             while True:
                 msg = await self.ws.receive_text()
-                data = self._parse_json(msg)
+                data = parse_json(msg)
                 if data is None:
                     await self.status.send_info(self.ws, "Invalid JSON")
                     continue
@@ -500,24 +339,21 @@ class WallSitWebSocketSession:
         except WebSocketDisconnect:
             print(f"[WS] disconnect session_id={self.st.session_id}")
             return
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-except
             print(f"[WS] error: {e}")
             try:
                 await self.status.send_info(self.ws, f"Server error: {e}")
-            except Exception:
+            except Exception:  # pylint: disable=broad-except
                 pass
             return
 
-    def _parse_json(self, msg: str) -> Optional[Dict[str, Any]]:
-        try:
-            obj = json.loads(msg)
-            if isinstance(obj, dict):
-                return obj
-            return None
-        except Exception:
-            return None
+
+    # ---------------------------------------------------------------
+    # Start / Stop handlers
+    # ---------------------------------------------------------------
 
     async def _handle_start(self) -> None:
+        """Handle session start message. Reset all state."""
         self.st = StreamState(started=True)
         self.st.session_id = str(int(time.time() * 1000))
 
@@ -528,26 +364,41 @@ class WallSitWebSocketSession:
 
         print(f"[SESSION] START session_id={self.st.session_id}")
 
-        await self.status.send_info(self.ws, "Start streaming", {"session_id": self.st.session_id})
-        await self.status.send_status(self.ws, self.st, PHASE_NO_POSE, {"reason": "session_started"}, force=True)
+        await self.status.send_info(
+            self.ws, "Start streaming", {"session_id": self.st.session_id}
+        )
+        await self.status.send_status(
+            self.ws, self.st, PHASE_NO_POSE,
+            {"reason": "session_started"}, force=True,
+        )
 
     async def _handle_stop(self) -> None:
+        """Handle session stop message. Reset gate and buffers."""
         print(f"[SESSION] STOP session_id={self.st.session_id}")
         self.st.started = False
 
-        await self.status.send_info(self.ws, "Stop streaming", {"session_id": self.st.session_id})
-        await self.status.send_status(self.ws, self.st, PHASE_NO_POSE, {"reason": "session_stopped"}, force=True)
+        await self.status.send_info(
+            self.ws, "Stop streaming", {"session_id": self.st.session_id}
+        )
+        await self.status.send_status(
+            self.ws, self.st, PHASE_NO_POSE,
+            {"reason": "session_stopped"}, force=True,
+        )
 
         self._reset_gate_and_buffers(reset_watchdog=True)
 
+    # ---------------------------------------------------------------
+    # State reset
+    # ---------------------------------------------------------------
+
     def _reset_gate_and_buffers(self, reset_watchdog: bool) -> None:
+        """Reset gate state, feature buffers, and optionally watchdogs."""
         self.st.foot_wall_vals.clear()
         self.st.stand_streak = 0
         self.st.ready = False
         self.st.ready_streak = 0
         self.st.chosen_side = None
 
-        # reset last sent/pred memories
         self.st.last_sent_label = ""
         self.st.last_sent_conf = None
         self.st.last_pred_label = ""
@@ -560,27 +411,34 @@ class WallSitWebSocketSession:
             self.st.dark_since = None
             self.st.dark_alerted = False
 
+    # ---------------------------------------------------------------
+    # Frame handler
+    # ---------------------------------------------------------------
+
     async def _handle_frame(self, data: Dict[str, Any]) -> None:
+        """Process a single video frame through the full pipeline."""
         if not self.st.started:
             return
 
         self.st.frame_count += 1
 
+        # Step 1: Decode frame
         frame = FrameDecoder.decode_jpeg_base64(data.get("jpeg_b64", ""))
         if frame is None:
             await self.status.send_info(self.ws, "Decode failed")
             return
 
-        # brightness check (used when NO_POSE)
+        # Step 2: Check brightness
         too_dark, brightness_mean = FrameQuality.is_too_dark(frame, DARK_BRIGHTNESS_TH)
 
+        # Step 3: Run pose detection
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         res = self.pose.process(img_rgb)
 
+        # Step 4: Side-view gate
         side_debug: Dict[str, Any] = {}
         chosen_side: Optional[str] = None
 
-        # Decide side (or keep locked after READY)
         if res.pose_landmarks:
             lm = res.pose_landmarks.landmark
             if self.st.ready and self.st.chosen_side is not None:
@@ -588,88 +446,25 @@ class WallSitWebSocketSession:
             else:
                 chosen_side, side_debug = self.gate.choose_best_side(lm)
 
-        # Gate fail -> NO_POSE watchdog + DARK watchdog (dark first)
+        # Gate failure: NO_POSE watchdog + DARK watchdog
         if (not res.pose_landmarks) or (chosen_side is None):
-            now = time.time()
-
-            # start counting NO_POSE duration
-            if self.st.no_pose_since is None:
-                self.st.no_pose_since = now
-                self.st.no_pose_alerted = False
-
-            # start/stop counting DARK duration
-            if too_dark:
-                if self.st.dark_since is None:
-                    self.st.dark_since = now
-                    self.st.dark_alerted = False
-            else:
-                self.st.dark_since = None
-                self.st.dark_alerted = False
-
-            # 1) DARK message first (one-time)
-            if (
-                too_dark
-                and (self.st.dark_since is not None)
-                and (not self.st.dark_alerted)
-                and (now - self.st.dark_since >= DARK_ADJUST_SECONDS)
-            ):
-                await self.status.send_info(
-                    self.ws,
-                    "Please adjust your lights.",
-                    {"brightness_mean": round(brightness_mean, 1), "brightness_th": DARK_BRIGHTNESS_TH},
-                )
-                self.st.dark_alerted = True
-
-            # 2) NO_POSE message (only if not already explained by dark)
-            if (
-                (not self.st.no_pose_alerted)
-                and (now - self.st.no_pose_since >= NO_POSE_ADJUST_SECONDS)
-                and (not too_dark)  # if dark, we prefer dark message
-            ):
-                await self.status.send_info(
-                    self.ws,
-                    "Adjust your camera to see your full body",
-                    {"brightness_mean": round(brightness_mean, 1), "brightness_th": DARK_BRIGHTNESS_TH},
-                )
-                self.st.no_pose_alerted = True
-
-            # reset gate/buffer, but keep watchdog running (reset_watchdog=False)
-            self._reset_gate_and_buffers(reset_watchdog=False)
-
-            await self.status.send_status(
-                self.ws,
-                self.st,
-                PHASE_NO_POSE,
-                {
-                    "chosen_side": None,
-                    "ready_streak": 0,
-                    "needed_streak": self.ready_streak_n,
-                    "window_fill": 0,
-                    "window_size": self.window_frames,
-                    "too_dark": too_dark,
-                    "brightness_mean": round(brightness_mean, 1),
-                    "brightness_th": DARK_BRIGHTNESS_TH,
-                    "debug": side_debug if self.debug else None,
-                },
-            )
+            await self._handle_no_pose(too_dark, brightness_mean, side_debug)
             return
 
-        # regained pose -> reset watchdogs
+        # Pose regained: reset watchdogs
         self.st.no_pose_since = None
         self.st.no_pose_alerted = False
         self.st.dark_since = None
         self.st.dark_alerted = False
 
-        # Side OK this frame
+        # Step 5: Track ready streak
         self.st.ready_streak += 1
         self.st.chosen_side = chosen_side
 
-        # Have pose but not ready yet => HAVE_POSE
+        # Not ready yet: HAVE_POSE phase
         if (not self.st.ready) and (self.st.ready_streak < self.ready_streak_n):
             await self.status.send_status(
-                self.ws,
-                self.st,
-                PHASE_HAVE_POSE,
+                self.ws, self.st, PHASE_HAVE_POSE,
                 {
                     "chosen_side": chosen_side,
                     "ready_streak": self.st.ready_streak,
@@ -680,35 +475,28 @@ class WallSitWebSocketSession:
             )
             return
 
-        # First time ready => enter BUFFERING
+        # First time ready: enter BUFFERING
         if (not self.st.ready) and (self.st.ready_streak >= self.ready_streak_n):
             self.st.ready = True
             self.st.foot_wall_vals.clear()
-
-            # reset last sent (if you previously used dedup)
             self.st.last_sent_label = ""
             self.st.last_sent_conf = None
 
             print(f"[GATE] READY session_id={self.st.session_id} side={chosen_side}")
             await self.status.send_info(
-                self.ws,
-                "Side View OK",
+                self.ws, "Side View OK",
                 {"session_id": self.st.session_id, "side": chosen_side},
             )
             await self.status.send_status(
-                self.ws,
-                self.st,
-                PHASE_BUFFERING,
+                self.ws, self.st, PHASE_BUFFERING,
                 {"chosen_side": chosen_side, "window_fill": 0, "window_size": self.window_frames},
                 force=True,
             )
 
-        # If model missing, still report phase but skip inference
+        # Model not loaded or not ready: stay in BUFFERING
         if (not self.model_svc.loaded) or (not self.st.ready) or (self.st.chosen_side is None):
             await self.status.send_status(
-                self.ws,
-                self.st,
-                PHASE_BUFFERING,
+                self.ws, self.st, PHASE_BUFFERING,
                 {
                     "chosen_side": self.st.chosen_side,
                     "window_fill": len(self.st.foot_wall_vals),
@@ -717,15 +505,14 @@ class WallSitWebSocketSession:
             )
             return
 
+        # Step 6: Extract features
         feat_tuple = self.feat.extract_features(res, self.st.chosen_side)
 
         if feat_tuple is None:
             self.st.foot_wall_vals.clear()
             self.st.stand_streak = 0
             await self.status.send_status(
-                self.ws,
-                self.st,
-                PHASE_BUFFERING,
+                self.ws, self.st, PHASE_BUFFERING,
                 {
                     "chosen_side": self.st.chosen_side,
                     "window_fill": 0,
@@ -734,7 +521,7 @@ class WallSitWebSocketSession:
             )
             return
 
-        # Standing gate: when knee angle is near-straight, don't run wall-sit classifier yet
+        # Step 7: Standing gate — avoid predicting while standing upright
         knee_angle = float(feat_tuple[1])
         if knee_angle >= STAND_KNEE_ANGLE_DEG_TH:
             self.st.stand_streak += 1
@@ -747,12 +534,9 @@ class WallSitWebSocketSession:
                     f"[WALLSIT] STANDING gate: session_id={self.st.session_id} "
                     f"side={self.st.chosen_side} knee_angle={knee_angle:.1f} th={STAND_KNEE_ANGLE_DEG_TH}"
                 )
-            # clear buffers so we don't mix standing frames with wall-sit frames
             self.st.foot_wall_vals.clear()
             await self.status.send_status(
-                self.ws,
-                self.st,
-                PHASE_HAVE_POSE,
+                self.ws, self.st, PHASE_HAVE_POSE,
                 {
                     "chosen_side": self.st.chosen_side,
                     "ready_streak": self.st.ready_streak,
@@ -768,12 +552,10 @@ class WallSitWebSocketSession:
 
         self.st.foot_wall_vals.append(feat_tuple)
 
-        # Not enough frames yet => BUFFERING
+        # Step 8: Not enough frames yet: BUFFERING
         if len(self.st.foot_wall_vals) < self.window_frames:
             await self.status.send_status(
-                self.ws,
-                self.st,
-                PHASE_BUFFERING,
+                self.ws, self.st, PHASE_BUFFERING,
                 {
                     "chosen_side": self.st.chosen_side,
                     "window_fill": len(self.st.foot_wall_vals),
@@ -782,11 +564,9 @@ class WallSitWebSocketSession:
             )
             return
 
-        # Enough frames => INFERENCING
+        # Step 9: Enough frames — run inference
         await self.status.send_status(
-            self.ws,
-            self.st,
-            PHASE_INFERENCING,
+            self.ws, self.st, PHASE_INFERENCING,
             {
                 "chosen_side": self.st.chosen_side,
                 "window_fill": len(self.st.foot_wall_vals),
@@ -803,7 +583,7 @@ class WallSitWebSocketSession:
         self.st.last_pred_label = pred_label
         self.st.last_pred_conf = conf
 
-        # send result every inference (dedup removed)
+        # Step 10: Send result
         payload: Dict[str, Any] = {
             "type": "result",
             "prediction": pred_label,
@@ -816,26 +596,108 @@ class WallSitWebSocketSession:
             print(f"[PRED] {payload}")
         await self.ws.send_text(json.dumps(payload))
 
-        # keep list bounded (avoid growing forever)
+        # Bound feature buffer to prevent unbounded growth
         if len(self.st.foot_wall_vals) > (self.window_frames + 60):
             self.st.foot_wall_vals = self.st.foot_wall_vals[-(self.window_frames + 60):]
 
+    # ---------------------------------------------------------------
+    # Watchdog handlers
+    # ---------------------------------------------------------------
 
-# -----------------------------
-# Routes
-# -----------------------------
-model_service = ModelService(MODEL_PATH)
+    async def _handle_no_pose(
+        self,
+        too_dark: bool,
+        brightness_mean: float,
+        side_debug: Dict[str, Any],
+    ) -> None:
+        """Handle frames where pose or side gate fails.
+
+        Manages the NO_POSE and DARK watchdog timers, sending
+        user-facing messages after configured timeout periods.
+        """
+        now = time.time()
+
+        # Start NO_POSE watchdog
+        if self.st.no_pose_since is None:
+            self.st.no_pose_since = now
+            self.st.no_pose_alerted = False
+
+        # Track DARK watchdog
+        if too_dark:
+            if self.st.dark_since is None:
+                self.st.dark_since = now
+                self.st.dark_alerted = False
+        else:
+            self.st.dark_since = None
+            self.st.dark_alerted = False
+
+        # DARK alert (takes priority over NO_POSE)
+        if (
+            too_dark
+            and (self.st.dark_since is not None)
+            and (not self.st.dark_alerted)
+            and (now - self.st.dark_since >= DARK_ADJUST_SECONDS)
+        ):
+            await self.status.send_info(
+                self.ws,
+                "Please adjust your lights.",
+                {"brightness_mean": round(brightness_mean, 1), "brightness_th": DARK_BRIGHTNESS_TH},
+            )
+            self.st.dark_alerted = True
+
+        # NO_POSE alert (only if not explained by darkness)
+        if (
+            (not self.st.no_pose_alerted)
+            and (now - self.st.no_pose_since >= NO_POSE_ADJUST_SECONDS)
+            and (not too_dark)
+        ):
+            await self.status.send_info(
+                self.ws,
+                "Adjust your camera to see your full body",
+                {"brightness_mean": round(brightness_mean, 1), "brightness_th": DARK_BRIGHTNESS_TH},
+            )
+            self.st.no_pose_alerted = True
+
+        # Reset gate/buffers but keep watchdog timers running
+        self._reset_gate_and_buffers(reset_watchdog=False)
+
+        await self.status.send_status(
+            self.ws, self.st, PHASE_NO_POSE,
+            {
+                "chosen_side": None,
+                "ready_streak": 0,
+                "needed_streak": self.ready_streak_n,
+                "window_fill": 0,
+                "window_size": self.window_frames,
+                "too_dark": too_dark,
+                "brightness_mean": round(brightness_mean, 1),
+                "brightness_th": DARK_BRIGHTNESS_TH,
+                "debug": side_debug if self.debug else None,
+            },
+        )
+
+
+# ---------------------------------------------------------------
+# Shared service instances
+# ---------------------------------------------------------------
+
+model_service = SklearnModelService(MODEL_PATH)
 label_mapper = LabelMapper(LABELS)
 
 mp_pose = mp.solutions.pose
 side_gate = SideGate(mp_pose=mp_pose, side_mode=SIDE_MODE, vis_th=VIS_TH)
-feature_extractor = FeatureExtractor(mp_pose=mp_pose)
+feature_extractor = WallSitFeatureExtractor(mp_pose=mp_pose)
 
 status_sender = StatusSender(every_n_frames=STATUS_SEND_EVERY_N_FRAMES)
 
 
+# ---------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
+    """Health check endpoint with server configuration details."""
     return {
         "status": "ok",
         "model_loaded": model_service.loaded,
@@ -855,6 +717,7 @@ def health() -> Dict[str, Any]:
 
 @app.websocket("/ws/video")
 async def ws_video(websocket: WebSocket) -> None:
+    """WebSocket endpoint for wall sit streaming sessions."""
     session = WallSitWebSocketSession(
         websocket=websocket,
         model_svc=model_service,
@@ -869,9 +732,10 @@ async def ws_video(websocket: WebSocket) -> None:
     await session.run()
 
 
-# -----------------------------
+# ---------------------------------------------------------------
 # Main
-# -----------------------------
+# ---------------------------------------------------------------
+
 def main() -> None:
     """Run server via uvicorn."""
     parser = argparse.ArgumentParser()
@@ -895,5 +759,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

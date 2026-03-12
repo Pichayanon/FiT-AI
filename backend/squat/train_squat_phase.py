@@ -17,15 +17,24 @@ from torch.utils.data import Dataset, DataLoader
 class PhaseDataset(Dataset):
     def __init__(self, data_dir: str, window=30, stride=5):
         self.samples = []
+        self.in_dim = None
 
         files = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
         assert files, "No .npz files found"
 
         for f in files:
             d = np.load(f)
-            X = d["features"]    # (T, 10)
+            X = d["features"]    # (T, F)
             y = d["labels"]      # (T,) → values {0,1}
             m = d["mask"]        # (T,)
+
+            if self.in_dim is None:
+                self.in_dim = int(X.shape[1])
+            elif int(X.shape[1]) != int(self.in_dim):
+                raise ValueError(
+                    f"Inconsistent feature dimension in {f}: "
+                    f"got {X.shape[1]}, expected {self.in_dim}"
+                )
 
             T = len(X)
             for i in range(0, T - window + 1, stride):
@@ -46,7 +55,7 @@ class PhaseDataset(Dataset):
     def __getitem__(self, idx):
         x, y = self.samples[idx]
         return (
-            torch.from_numpy(x).float(),   # (W, 8)
+            torch.from_numpy(x).float(),   # (W, F)
             torch.from_numpy(y).long(),    # (W,)
         )
 
@@ -104,7 +113,11 @@ def train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ds = PhaseDataset(args.data, args.window, args.stride)
     dl = DataLoader(ds, batch_size=args.bs, shuffle=True)
-    model = SimpleTCN(in_dim=10, num_classes=2).to(device)
+
+    if ds.in_dim is None:
+        raise RuntimeError("Dataset appears empty; cannot infer feature dimension.")
+
+    model = SimpleTCN(in_dim=ds.in_dim, num_classes=2).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     crit = nn.CrossEntropyLoss()
     for epoch in range(1, args.epochs + 1):
@@ -136,7 +149,7 @@ def train(args):
     torch.save(
         {
             "state_dict": model.state_dict(),
-            "in_dim": 10,
+            "in_dim": int(ds.in_dim),
             "num_classes": 2,
             "window": args.window,
         },

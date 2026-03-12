@@ -1,0 +1,59 @@
+version: "3.9"
+
+services:
+  squat-streaming:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    container_name: squat-streaming
+    command: >
+      uvicorn squat.squat_streaming:app
+      --host 0.0.0.0
+      --port 5051
+      --log-level info
+    ports:
+      - "5051:5051"
+    restart: unless-stopped
+
+  wall-sit-streaming:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    container_name: wall-sit-streaming
+    command: >
+      uvicorn wall_sit.wall_sit_streaming:app
+      --host 0.0.0.0
+      --port 5050
+      --log-level info
+    ports:
+      - "5050:5050"
+    restart: unless-stopped
+
+  plank-streaming:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    container_name: plank-streaming
+    command: >
+      uvicorn plank.plank_streaming:app
+      --host 0.0.0.0
+      --port 5052
+      --log-level info
+    ports:
+      - "5052:5052"
+    restart: unless-stopped
+
+  lunges-streaming:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    container_name: lunges-streaming
+    command: >
+      uvicorn lunges.lunges_streaming:app
+      --host 0.0.0.0
+      --port 5053
+      --log-level info
+    ports:
+      - "5053:5053"
+    restart: unless-stopped
+

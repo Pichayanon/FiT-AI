@@ -1,0 +1,8 @@
+venv/
+dataset/
+__pycache__/
+.DS_Store
+*.pyc
+*.mp4
+recordings_squat/
+lunges/recordings/
