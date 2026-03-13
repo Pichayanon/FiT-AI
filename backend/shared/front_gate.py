@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 
-class FrontViewGate:
+class FrontViewGateDynamic:
     """Front-view gate: visibility check plus left-right body separation.
 
     Ensures that both sides of the body are visible and that

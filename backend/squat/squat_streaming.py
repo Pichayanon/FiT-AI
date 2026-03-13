@@ -5,7 +5,7 @@ Real-time squat analysis with front-view gate, phase detection (eccentric/concen
 bottom-event TCN classification, and standing posture TCN assessment.
 
 Key features:
-    - Front-view gate (FrontViewGate): validates body visibility and separation
+    - Front-view gate (FrontViewGateDynamic): validates body visibility and separation
     - Phase TCN: detects eccentric/concentric phases from train_squat_phase
     - Bottom TCN: classifies form at eccentric-to-concentric transition
     - Stand TCN: evaluates standing posture before first rep
@@ -42,7 +42,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from shared.frame_decoder import FrameDecoder
-from shared.front_gate import FrontViewGate
+from shared.front_gate import FrontViewGateDynamic
 from shared.json_utils import parse_json
 from shared.math_utils import angle_3pts, safe_norm, dist, get_xyz
 from shared.status_sender import StatusSender
@@ -491,7 +491,7 @@ class StreamState:
 # ---------------------------------------------------------------
 
 model_service = SquatModelService(TCN_MODEL_PATH, STAND_MODEL_PATH, PHASE_MODEL_PATH)
-front_view_gate = FrontViewGate(
+front_view_gate = FrontViewGateDynamic(
     mp_pose, FRONT_VIS_TH, FRONT_MIN_SHOULDER_X_GAP, FRONT_MIN_HIP_X_GAP
 )
 status_sender = StatusSender(STATUS_SEND_EVERY_N_FRAMES, PHASE_SEND_EVERY_N_FRAMES)
@@ -533,7 +533,7 @@ class SquatWebSocketSession:
         self,
         websocket: WebSocket,
         model_svc: SquatModelService,
-        gate: FrontViewGate,
+        gate: FrontViewGateDynamic,
         status: StatusSender,
         ready_streak_n: int,
         debug: bool,
@@ -1063,7 +1063,7 @@ def main() -> None:
     if args.serve:
         import uvicorn
         uvicorn.run(
-            "squat_streaming:app",
+            "squat.squat_streaming:app",
             host="0.0.0.0",
             port=5051,
             reload=False,

@@ -1,0 +1,119 @@
+"""
+Side-view visibility gate for dynamic exercises requiring lateral camera angle.
+
+Used by lunges to verify that the user's full body (legs + upper body)
+is sufficiently visible before processing begins. Unlike the existing
+SideGate (used by plank/wall_sit for left/right side selection), this
+gate simply checks overall visibility for dynamic side-view exercises.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Tuple
+
+
+class SideViewGateDynamic:
+    """Side-view visibility gate for dynamic exercises (e.g., lunges).
+
+    Checks that:
+        - All leg landmarks (hips, knees, ankles) are visible
+        - At least one shoulder is visible (upper body)
+
+    Returns (ok, debug) tuple matching FrontViewGateDynamic interface.
+    """
+
+    def __init__(
+        self,
+        mp_pose: Any,
+        vis_th: float = 0.65,
+    ) -> None:
+        """Initialize the side-view dynamic gate.
+
+        Args:
+            mp_pose: MediaPipe pose solutions module (mp.solutions.pose).
+            vis_th: Minimum visibility threshold for required landmarks.
+        """
+        self.mp_pose = mp_pose
+        self.vis_th = vis_th
+
+        # Required: all leg landmarks must be visible
+        self.LEG_LM: List[int] = [
+            mp_pose.PoseLandmark.LEFT_HIP,
+            mp_pose.PoseLandmark.RIGHT_HIP,
+            mp_pose.PoseLandmark.LEFT_KNEE,
+            mp_pose.PoseLandmark.RIGHT_KNEE,
+            mp_pose.PoseLandmark.LEFT_ANKLE,
+            mp_pose.PoseLandmark.RIGHT_ANKLE,
+        ]
+
+        # Required: at least one shoulder must be visible
+        self.SHOULDER_LM: List[int] = [
+            mp_pose.PoseLandmark.LEFT_SHOULDER,
+            mp_pose.PoseLandmark.RIGHT_SHOULDER,
+        ]
+
+        self.LM_LABELS: Dict[int, str] = {
+            mp_pose.PoseLandmark.LEFT_HIP: "L_HIP",
+            mp_pose.PoseLandmark.RIGHT_HIP: "R_HIP",
+            mp_pose.PoseLandmark.LEFT_KNEE: "L_KNE",
+            mp_pose.PoseLandmark.RIGHT_KNEE: "R_KNE",
+            mp_pose.PoseLandmark.LEFT_ANKLE: "L_ANK",
+            mp_pose.PoseLandmark.RIGHT_ANKLE: "R_ANK",
+            mp_pose.PoseLandmark.LEFT_SHOULDER: "L_SHO",
+            mp_pose.PoseLandmark.RIGHT_SHOULDER: "R_SHO",
+        }
+
+    def check(self, lm: Any) -> Tuple[bool, Dict[str, Any]]:
+        """Check if the side-view visibility gate passes.
+
+        Accepts either MediaPipe landmark list or numpy array (N, 4)
+        where column 3 is visibility.
+
+        Args:
+            lm: MediaPipe landmark list or numpy array of shape (33, 4).
+
+        Returns:
+            Tuple of (gate_passes, debug_info_dict).
+        """
+        import numpy as np
+
+        # Support both MediaPipe landmarks and numpy arrays
+        is_np = isinstance(lm, np.ndarray)
+
+        vis_map: Dict[str, float] = {}
+        fail_reason = ""
+
+        # Check legs
+        legs_ok = True
+        for idx in self.LEG_LM:
+            v = float(lm[idx, 3]) if is_np else float(lm[idx].visibility)
+            vis_map[self.LM_LABELS.get(idx, str(idx))] = round(v, 3)
+            if v < self.vis_th:
+                legs_ok = False
+                if not fail_reason:
+                    fail_reason = "Legs/Feet not visible"
+
+        # Check shoulders (at least one)
+        sho_ok = False
+        for idx in self.SHOULDER_LM:
+            v = float(lm[idx, 3]) if is_np else float(lm[idx].visibility)
+            vis_map[self.LM_LABELS.get(idx, str(idx))] = round(v, 3)
+            if v >= self.vis_th:
+                sho_ok = True
+
+        if not sho_ok and not fail_reason:
+            fail_reason = "Upper body not visible"
+
+        ok = legs_ok and sho_ok
+
+        dbg: Dict[str, Any] = {
+            "vis_ok": ok,
+            "legs_ok": legs_ok,
+            "sho_ok": sho_ok,
+            "vis_th": float(self.vis_th),
+            "vis": vis_map,
+        }
+        if fail_reason:
+            dbg["reason"] = fail_reason
+
+        return ok, dbg
