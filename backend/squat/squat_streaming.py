@@ -48,7 +48,6 @@ from shared.math_utils import angle_3pts, safe_norm, dist, get_xyz
 from shared.status_sender import StatusSender
 from shared.tcn_models import PhaseTCN
 from shared.tcn_service import load_tcn, load_phase_tcn, tcn_predict
-from shared.video_utils import create_video_writer
 
 
 # ---------------------------------------------------------------
@@ -84,12 +83,6 @@ MP_MIN_TRACK_CONF = 0.80
 STATUS_SEND_EVERY_N_FRAMES = 3
 PHASE_SEND_EVERY_N_FRAMES = 2
 
-SAVE_VIDEO = True
-RECORD_DIR = "recordings_squat"
-RECORD_FPS = 10.0
-RECORD_ONLY_WHEN_READY = False
-PRINT_EVERY_SAVED_FRAMES = 30
-os.makedirs(RECORD_DIR, exist_ok=True)
 
 STAND_MIN_STREAK = 6
 STAND_PRED_COOLDOWN = 12
@@ -98,7 +91,6 @@ STAND_WIN_FRAMES = PRE_FRAMES + POST_FRAMES + 1
 STAND_OK_LABELS = {"good_stand"}
 GOAL_GOOD_REPS = 5
 
-DEBUG = True
 
 # MediaPipe landmark indices
 L_SHO, R_SHO = 11, 12
@@ -109,10 +101,6 @@ L_ANK, R_ANK = 27, 28
 PHASE_LABELS = {0: "eccentric", 1: "concentric"}
 
 mp_pose = mp.solutions.pose
-mp_drawing = mp.solutions.drawing_utils
-mp_styles = mp.solutions.drawing_styles
-
-
 # ---------------------------------------------------------------
 # FastAPI Application
 # ---------------------------------------------------------------
@@ -342,71 +330,6 @@ class SquatModelService:
 
 
 # ---------------------------------------------------------------
-# Overlay drawing (debug visualization)
-# ---------------------------------------------------------------
-
-def draw_overlay(
-    frame_bgr: np.ndarray,
-    res: Any,
-    state: str,
-    phase: str,
-    knee_raw: Optional[float],
-    knee_ema: Optional[float],
-    pred_text: Optional[str] = None,
-    extra_text: Optional[str] = None,
-    stand_gate_text: Optional[str] = None,
-    stand_pred_text: Optional[str] = None,
-    rep_text: Optional[str] = None,
-    feat_dim: Optional[int] = None,
-    gate_text: Optional[str] = None,
-) -> np.ndarray:
-    """Draw pose landmarks and debug info onto a frame for recording."""
-    out = frame_bgr.copy()
-    if res.pose_landmarks:
-        mp_drawing.draw_landmarks(
-            out,
-            res.pose_landmarks,
-            mp_pose.POSE_CONNECTIONS,
-            landmark_drawing_spec=mp_styles.get_default_pose_landmarks_style(),
-        )
-
-    y = 26
-
-    def put(t: str, s: float = 0.7) -> None:
-        nonlocal y
-        cv2.putText(out, t, (12, y), cv2.FONT_HERSHEY_SIMPLEX, s,
-                     (255, 255, 255), 2, cv2.LINE_AA)
-        y += 26
-
-    put(f"State: {state}")
-    if gate_text:
-        put(gate_text, 0.60)
-    put(f"Phase: {phase}")
-    put(f"Knee: {knee_raw:.1f}" if knee_raw is not None else "Knee: NA")
-    put(
-        f"stand={STAND_FEATURE_DIM}d bottom={BOTTOM_FEATURE_DIM}d | "
-        f"ecc->conc knee>={STAND_KNEE_ANGLE_DEG_TH:.0f} "
-        f"d<={STAND_KNEE_DELTA_MAX_DEG:.1f}",
-        0.55,
-    )
-    if extra_text:
-        put(extra_text, 0.6)
-    if stand_gate_text:
-        put(stand_gate_text, 0.6)
-    if rep_text:
-        put(rep_text, 0.65)
-    if pred_text:
-        cv2.putText(out, pred_text, (12, y + 6), cv2.FONT_HERSHEY_SIMPLEX,
-                     0.82, (255, 255, 255), 2, cv2.LINE_AA)
-        y += 30
-    if stand_pred_text:
-        cv2.putText(out, stand_pred_text, (12, y + 6), cv2.FONT_HERSHEY_SIMPLEX,
-                     0.72, (255, 255, 255), 2, cv2.LINE_AA)
-
-    return out
-
-
-# ---------------------------------------------------------------
 # Rep counter
 # ---------------------------------------------------------------
 
@@ -432,28 +355,17 @@ class StreamState:
 
     started: bool = False
     session_id: str = ""
-    out_path_no_ext: str = ""
 
     # Gate
     ready: bool = False
     ready_streak: int = 0
     last_gate_debug: Dict[str, Any] = field(default_factory=dict)
 
-    # Recording
-    writer: Optional[cv2.VideoWriter] = None
-    writer_size: Optional[Tuple[int, int]] = None
-    actual_video_path: str = ""
-    saved_frames: int = 0
-
     # Status/phase throttles
     status_tick: int = 0
     phase_tick: int = 0
     last_status: str = ""
     last_phase: str = "stand"
-
-    # Last predictions for overlay
-    last_pred_label: str = ""
-    last_pred_conf: Optional[float] = None
 
     # Standing predict state
     stand_streak: int = 0
@@ -517,7 +429,6 @@ def health() -> Dict[str, Any]:
         "front_vis_th": FRONT_VIS_TH,
         "front_min_sho_gap": FRONT_MIN_SHOULDER_X_GAP,
         "front_min_hip_gap": FRONT_MIN_HIP_X_GAP,
-        "record_dir": os.path.abspath(RECORD_DIR),
         "timestamp": int(time.time()),
     }
 
@@ -583,7 +494,6 @@ class SquatWebSocketSession:
             self.ws,
             "WebSocket connected",
             {
-                "record_dir": os.path.abspath(RECORD_DIR),
                 "stand_feature_dim": STAND_FEATURE_DIM,
                 "bottom_feature_dim": BOTTOM_FEATURE_DIM,
                 "front_gate": {
@@ -616,12 +526,10 @@ class SquatWebSocketSession:
                 await self._handle_frame(data)
         except WebSocketDisconnect:
             print(f"[WS] disconnect session_id={self.st.session_id}")
-            await self._cleanup_recording()
             return
         except Exception as e:  # pylint: disable=broad-except
             print(f"[WS] error: {e}")
             print(traceback.format_exc())
-            await self._cleanup_recording()
             try:
                 await self.status.send_info(self.ws, f"Server error: {e}")
             except Exception:  # pylint: disable=broad-except
@@ -630,47 +538,6 @@ class SquatWebSocketSession:
     # ---------------------------------------------------------------
     # Helpers
     # ---------------------------------------------------------------
-
-
-    async def _cleanup_recording(self) -> None:
-        """Release video writer if active."""
-        if self.st.writer is not None:
-            try:
-                self.st.writer.release()
-                print(f"[RECORD] STOP path={self.st.actual_video_path} frames={self.st.saved_frames}")
-            except Exception as e:  # pylint: disable=broad-except
-                print(f"[RECORD] release error: {e}")
-        self.st.writer = None
-        self.st.writer_size = None
-
-    async def _start_recording_for_frame(self, frame_bgr: np.ndarray) -> None:
-        """Initialize video writer on first frame if recording is enabled."""
-        if not SAVE_VIDEO:
-            return
-        h, w = frame_bgr.shape[:2]
-        if self.st.writer is None:
-            writer, actual_path = create_video_writer(self.st.out_path_no_ext, w, h, RECORD_FPS)
-            if writer is None:
-                await self.status.send_info(self.ws, "Recording disabled: cannot create VideoWriter")
-                return
-            self.st.writer = writer
-            self.st.writer_size = (w, h)
-            self.st.actual_video_path = actual_path
-            self.st.saved_frames = 0
-            print(f"[RECORD] START path={actual_path} size={w}x{h}@{RECORD_FPS}")
-            await self.status.send_info(self.ws, "Recording started", {"video_path": actual_path})
-
-    def _write_frame_to_recording(self, overlay: np.ndarray) -> None:
-        """Write a frame to the video recording, handling resize if needed."""
-        if self.st.writer is None:
-            return
-        tw, th = self.st.writer_size if self.st.writer_size else (overlay.shape[1], overlay.shape[0])
-        if (overlay.shape[1], overlay.shape[0]) != (tw, th):
-            overlay = cv2.resize(overlay, (tw, th))
-        self.st.writer.write(overlay)
-        self.st.saved_frames += 1
-        if self.st.saved_frames % PRINT_EVERY_SAVED_FRAMES == 0:
-            print(f"[RECORD] saved_frames={self.st.saved_frames} path={self.st.actual_video_path}")
 
     def _reset_buffers(self) -> None:
         """Reset all tracking buffers and streaks (used on gate failure or ready transition)."""
@@ -692,10 +559,8 @@ class SquatWebSocketSession:
 
     async def _handle_start(self) -> None:
         """Handle session start. Initialize all state."""
-        await self._cleanup_recording()
         self.st = StreamState(started=True)
         self.st.session_id = str(int(time.time() * 1000))
-        self.st.out_path_no_ext = os.path.join(RECORD_DIR, f"session_{self.st.session_id}")
         self.frame_i = 0
         print(f"[SESSION] START session_id={self.st.session_id}")
         await self.status.send_info(self.ws, "Start streaming", {"session_id": self.st.session_id})
@@ -705,14 +570,11 @@ class SquatWebSocketSession:
         """Handle session stop. Clean up and report summary."""
         print(f"[SESSION] STOP session_id={self.st.session_id}")
         self.st.started = False
-        await self._cleanup_recording()
         await self.status.send_info(
             self.ws,
             "Stop streaming",
             {
                 "session_id": self.st.session_id,
-                "video_path": self.st.actual_video_path,
-                "saved_frames": self.st.saved_frames,
                 "reps": {
                     "total": int(self.st.total_reps),
                     "correct": int(self.st.good_reps),
@@ -725,7 +587,7 @@ class SquatWebSocketSession:
         await self.status.send_status(self.ws, self.st, "waiting", {"reason": "session_stopped"}, force=True)
 
     # ---------------------------------------------------------------
-    # Bottom prediction (consolidated from duplicated code)
+    # Bottom prediction
     # ---------------------------------------------------------------
 
     async def _predict_and_send_bottom(
@@ -763,8 +625,6 @@ class SquatWebSocketSession:
 
         x_win = np.stack([r[2] for r in win], axis=0).astype(np.float32)
         pred_label, conf, _ = self.model_svc.predict_bottom(x_win)
-        self.st.last_pred_label = pred_label
-        self.st.last_pred_conf = conf
         is_good = pred_label.startswith("good")
         update_rep_counter(self.st, int(event_i), pred_label)
 
@@ -795,16 +655,6 @@ class SquatWebSocketSession:
         if int(payload.get("event_i", -1)) != self.st.last_sent_bottom_event_i:
             self.st.last_sent_bottom_event_i = int(payload.get("event_i", -1))
             await self.ws.send_text(json.dumps(payload))
-
-    # ---------------------------------------------------------------
-    # Recording helper
-    # ---------------------------------------------------------------
-
-    async def _record_overlay(self, overlay: np.ndarray) -> None:
-        """Write overlay frame to recording if enabled."""
-        if SAVE_VIDEO and ((not RECORD_ONLY_WHEN_READY) or self.st.ready):
-            await self._start_recording_for_frame(overlay)
-            self._write_frame_to_recording(overlay)
 
     # ---------------------------------------------------------------
     # Frame handler
@@ -848,12 +698,6 @@ class SquatWebSocketSession:
                     "reason": "front_gate_not_ok",
                 },
             )
-            overlay = draw_overlay(
-                frame_bgr=frame, res=res, state="waiting", phase="stand",
-                knee_raw=None, knee_ema=None,
-                gate_text=f"FRONT GATE: NO (vis_ok={gate_dbg.get('vis_ok')} gap_ok={gate_dbg.get('gap_ok')})",
-            )
-            await self._record_overlay(overlay)
             self.frame_i += 1
             return
 
@@ -868,7 +712,7 @@ class SquatWebSocketSession:
             self.st.pending = None
             self.st.prev_knee_raw = None
             self.st.last_sent_bottom_event_i = -10**9
-            self.st.last_sent_stand_label = ""
+            self.st.last_sent_bottom_event_i = -10**9
             await self.status.send_info(
                 self.ws, "Front View OK",
                 {"session_id": self.st.session_id, "gate": gate_dbg if self.debug else None},
@@ -888,12 +732,6 @@ class SquatWebSocketSession:
             )
 
         if not self.st.ready:
-            overlay = draw_overlay(
-                frame_bgr=frame, res=res, state="warming_up", phase="stand",
-                knee_raw=None, knee_ema=None,
-                gate_text=f"FRONT GATE: OK streak {self.st.ready_streak}/{self.ready_streak_n}",
-            )
-            await self._record_overlay(overlay)
             self.frame_i += 1
             return
 
@@ -944,38 +782,6 @@ class SquatWebSocketSession:
         # Add to history
         self.st.hist.append((self.frame_i, stand_feat, bottom_feat, frame.copy(), knee_raw, None))
 
-        # Build overlay text
-        pred_text = ""
-        if self.st.last_pred_label:
-            pred_text = (
-                f"BottomPred: {self.st.last_pred_label} ({self.st.last_pred_conf:.3f})"
-                if self.st.last_pred_conf is not None
-                else f"BottomPred: {self.st.last_pred_label}"
-            )
-        stand_pred_text = ""
-        if self.st.last_stand_pred_label:
-            stand_pred_text = (
-                f"StandPred(once): {self.st.last_stand_pred_label} ({self.st.last_stand_pred_conf:.3f})"
-                if self.st.last_stand_pred_conf is not None
-                else f"StandPred(once): {self.st.last_stand_pred_label}"
-            )
-        rep_text = (
-            f"Reps correct/incorrect/total: {self.st.good_reps}/{self.st.bad_reps}/"
-            f"{self.st.total_reps} (goal correct={GOAL_GOOD_REPS})"
-        )
-
-        overlay = draw_overlay(
-            frame_bgr=frame, res=res, state="ready", phase=phase,
-            knee_raw=knee_raw, knee_ema=None,
-            pred_text=pred_text if pred_text else None,
-            extra_text=(f"EVENT bottom @ {event_i}" if event_i is not None else None),
-            stand_gate_text=stand_gate_text,
-            stand_pred_text=stand_pred_text if stand_pred_text else None,
-            rep_text=rep_text,
-            feat_dim=BOTTOM_FEATURE_DIM,
-            gate_text=f"FRONT GATE: OK (sho_gap={gate_dbg.get('sho_gap')} hip_gap={gate_dbg.get('hip_gap')})",
-        )
-        await self._record_overlay(overlay)
 
         # Step 9: Bottom prediction (immediate)
         if event_i is not None and self.model_svc.bottom_loaded and self.model_svc.bottom_T is not None:
@@ -1006,8 +812,6 @@ class SquatWebSocketSession:
             x_win = np.stack([r[1] for r in recent], axis=0).astype(np.float32)
             pred_label, conf, _ = self.model_svc.predict_stand(x_win)
             self.st.last_stand_pred_i = self.frame_i
-            self.st.last_stand_pred_label = pred_label
-            self.st.last_stand_pred_conf = conf
             is_ok = pred_label in STAND_OK_LABELS
             self.st.stand_ok = bool(is_ok)
 
