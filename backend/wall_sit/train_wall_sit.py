@@ -17,6 +17,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from shared.math_utils import angle_3pts, safe_norm, dist, get_xyz
+
 # -----------------------------
 # Config
 # -----------------------------
@@ -52,12 +54,6 @@ DATASET = WallSitConfig(
 # -----------------------------
 # Utils
 # -----------------------------
-def angle(a, b, c):
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    ba, bc = a - b, c - b
-    cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
-    return np.degrees(np.arccos(np.clip(cos, -1, 1)))
-
 mp_pose = mp.solutions.pose
 
 
@@ -86,7 +82,6 @@ class WallSitFeatureExtractor:
 
             lm = res.pose_landmarks.landmark
 
-            # Decide visible side (same logic as before)
             right_vis = lm[mp_pose.PoseLandmark.RIGHT_HIP].visibility
             left_vis = lm[mp_pose.PoseLandmark.LEFT_HIP].visibility
             is_right = right_vis > left_vis
@@ -102,28 +97,24 @@ class WallSitFeatureExtractor:
                 ankle = lm[mp_pose.PoseLandmark.LEFT_ANKLE]
                 shoulder = lm[mp_pose.PoseLandmark.LEFT_SHOULDER]
 
-            # 1️⃣ Foot to wall distance (horizontal)
-            foot_wall_dist = abs(ankle.x - hip.x)
+            hip_w = dist(lm[mp_pose.PoseLandmark.LEFT_HIP].x, lm[mp_pose.PoseLandmark.RIGHT_HIP].x)
+            sho_w = dist(lm[mp_pose.PoseLandmark.LEFT_SHOULDER].x, lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].x)
+            scale = hip_w if hip_w > 1e-6 else (sho_w if sho_w > 1e-6 else 1e-6)
 
-            shoulder_width = abs(
-                lm[mp_pose.PoseLandmark.LEFT_SHOULDER].x
-                - lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].x
-            )
-
-            foot_wall_norm = foot_wall_dist / (shoulder_width + 1e-6)
+            # Foot to wall distance (horizontal)
+            foot_wall_dist = dist(ankle.x, hip.x)
+            foot_wall_dist_norm = foot_wall_dist / scale
             foot_wall_vals.append(foot_wall_norm)
 
-            # 2️⃣ Knee angle
-            knee_angle = angle(
-                [hip.x, hip.y],
-                [knee.x, knee.y],
-                [ankle.x, ankle.y],
-            )
-            knee_angles.append(knee_angle)
+            # Knee angle
+            knee_angle = angle_3pts([hip.x, hip.y],[knee.x, knee.y],[ankle.x, ankle.y])
+            knee_angle_norm = knee_angle / 180
+            knee_angles.append(knee_angle_norm)
 
-            # 3️⃣ Torso alignment (back against wall)
-            torso_align = abs(shoulder.x - hip.x)
-            torso_alignments.append(torso_align)
+            # Torso alignment (back against wall)
+            torso_align = dist(shoulder.x, hip.x)
+            torso_align_norm = torso_align / 180
+            torso_alignments.append(torso_align_norm)
 
         cap.release()
 
