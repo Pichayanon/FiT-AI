@@ -1,16 +1,17 @@
 """
-Plank WebSocket session handler.
+Wall Sit WebSocket session handler.
 
-Manages a single plank streaming session including pose detection,
-side-view gating, feature extraction, model inference, and result
-sending over WebSocket.
+Manages a single wall sit streaming session including pose detection,
+side-view gating, standing gate, feature extraction, buffering,
+inference, and result sending.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import mediapipe as mp
@@ -21,20 +22,155 @@ from shared.base_session import BaseWebSocketSession
 from shared.frame_decoder import FrameDecoder
 from shared.frame_quality import FrameQuality
 from shared.json_utils import parse_json
-from shared.label_mapper import LabelMapper
+from shared.math_utils import angle_3pts
 from shared.sklearn_model_service import SklearnModelService
 from shared.side_gate import SideGate
+from shared.label_mapper import LabelMapper
 from shared.status_sender import StatusSender
 
-from .feature_extractor import FeatureExtractor
-from .stream_state import StreamState
+
+# ---------------------------------------------------------------
+# Wall Sit Stream State
+# ---------------------------------------------------------------
+
+@dataclass
+class StreamState:
+    """Session-level state for a wall sit streaming WebSocket connection."""
+
+    started: bool = False
+    foot_wall_vals: List[Tuple[float, float, float]] = field(default_factory=list)
+    stand_streak: int = 0
+
+    # Gate
+    ready: bool = False
+    ready_streak: int = 0
+    chosen_side: Optional[str] = None
+
+    # Session metadata
+    session_id: str = ""
+
+    # Status throttle
+    last_status: str = ""
+    status_tick: int = 0
+
+    # Last prediction (for logs/debugging)
+    last_pred_label: str = ""
+    last_pred_conf: Optional[float] = None
+
+    # Last sent (for optional deduplication)
+    last_sent_label: str = ""
+    last_sent_conf: Optional[float] = None
+
+    # Frame counter
+    frame_count: int = 0
+
+    # NO_POSE watchdog
+    no_pose_since: Optional[float] = None
+    no_pose_alerted: bool = False
+
+    # DARK watchdog
+    dark_since: Optional[float] = None
+    dark_alerted: bool = False
 
 
-class PlankWebSocketSession(BaseWebSocketSession):
-    """Handle a single plank WebSocket streaming session.
+# ---------------------------------------------------------------
+# Wall Sit Feature Extractor
+# ---------------------------------------------------------------
 
-    Orchestrates the full pipeline: frame decoding, quality checks,
-    pose detection, side-view gating, feature extraction, buffering,
+class WallSitFeatureExtractor:
+    """Extract per-frame and window-level features for the wall sit model.
+
+    Per-frame feature tuple:
+        (foot_wall_norm, knee_angle, torso_alignment)
+    Window-level aggregate feature (5-D):
+        mean_fw, std_fw, mean_knee, min_knee, mean_torso
+    """
+
+    def __init__(self, mp_pose: Any) -> None:
+        self.mp_pose = mp_pose
+
+    @staticmethod
+    def _angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+        """Compute angle ABC (degrees) from 2D points."""
+        return angle_3pts(a, b, c)
+
+    def extract_features(
+        self, res: Any, side: str
+    ) -> Optional[Tuple[float, float, float]]:
+        """Extract per-frame feature tuple for wall sit.
+
+        Args:
+            res: MediaPipe pose result.
+            side: "left" or "right".
+
+        Returns:
+            Tuple of (foot_wall_norm, knee_angle, torso_alignment),
+            or None if landmarks are missing.
+        """
+        if not res.pose_landmarks:
+            return None
+
+        lm = res.pose_landmarks.landmark
+
+        if side == "right":
+            hip = self.mp_pose.PoseLandmark.RIGHT_HIP
+            knee = self.mp_pose.PoseLandmark.RIGHT_KNEE
+            ankle = self.mp_pose.PoseLandmark.RIGHT_ANKLE
+            shoulder = self.mp_pose.PoseLandmark.RIGHT_SHOULDER
+        else:
+            hip = self.mp_pose.PoseLandmark.LEFT_HIP
+            knee = self.mp_pose.PoseLandmark.LEFT_KNEE
+            ankle = self.mp_pose.PoseLandmark.LEFT_ANKLE
+            shoulder = self.mp_pose.PoseLandmark.LEFT_SHOULDER
+
+        # Foot-wall distance normalized by shoulder width
+        shoulder_width = abs(
+            lm[self.mp_pose.PoseLandmark.LEFT_SHOULDER].x
+            - lm[self.mp_pose.PoseLandmark.RIGHT_SHOULDER].x
+        ) + 1e-6
+        foot_wall = abs(lm[ankle].x - lm[hip].x) / shoulder_width
+
+        # Knee angle (hip-knee-ankle)
+        knee_angle = self._angle(
+            [lm[hip].x, lm[hip].y],
+            [lm[knee].x, lm[knee].y],
+            [lm[ankle].x, lm[ankle].y],
+        )
+
+        # Torso alignment (shoulder-hip horizontal distance)
+        torso_alignment = abs(lm[shoulder].x - lm[hip].x)
+
+        return float(foot_wall), float(knee_angle), float(torso_alignment)
+
+    @staticmethod
+    def aggregate_window(vals: List[Tuple[float, float, float]]) -> np.ndarray:
+        """Aggregate a window of per-frame tuples into a 5-D feature vector.
+
+        Returns:
+            Array of [mean_fw, std_fw, mean_knee, min_knee, mean_torso].
+        """
+        fw = [v[0] for v in vals]
+        knee = [v[1] for v in vals]
+        torso = [v[2] for v in vals]
+
+        return np.array([
+            np.mean(fw),
+            np.std(fw),
+            np.mean(knee),
+            np.min(knee),
+            np.mean(torso),
+        ], dtype=np.float32)
+
+
+# ---------------------------------------------------------------
+# Wall Sit WebSocket Session
+# ---------------------------------------------------------------
+
+class WallSitWebSocketSession(BaseWebSocketSession):
+    """Handle a single wall sit WebSocket streaming session.
+
+    Orchestrates: frame decoding, quality checks, pose detection,
+    side-view gating, standing gate, feature extraction, buffering,
     inference, and result sending.
     """
 
@@ -43,12 +179,13 @@ class PlankWebSocketSession(BaseWebSocketSession):
         websocket: WebSocket,
         model_svc: SklearnModelService,
         gate: SideGate,
-        feat: FeatureExtractor,
+        feat: WallSitFeatureExtractor,
         labels: LabelMapper,
         status: StatusSender,
         window_frames: int,
         ready_streak_n: int,
         debug: bool,
+        # Configuration constants
         side_mode: str,
         vis_th: float,
         mp_min_det_conf: float,
@@ -56,6 +193,8 @@ class PlankWebSocketSession(BaseWebSocketSession):
         no_pose_adjust_seconds: float,
         dark_adjust_seconds: float,
         dark_brightness_th: float,
+        stand_knee_angle_deg_th: float,
+        stand_streak_n: int,
         phase_no_pose: str,
         phase_have_pose: str,
         phase_buffering: str,
@@ -72,6 +211,7 @@ class PlankWebSocketSession(BaseWebSocketSession):
         self.ready_streak_n = int(ready_streak_n)
         self.debug = debug
 
+        # Store configuration
         self.side_mode = side_mode
         self.vis_th = vis_th
         self.mp_min_det_conf = mp_min_det_conf
@@ -79,6 +219,8 @@ class PlankWebSocketSession(BaseWebSocketSession):
         self.no_pose_adjust_seconds = no_pose_adjust_seconds
         self.dark_adjust_seconds = dark_adjust_seconds
         self.dark_brightness_th = dark_brightness_th
+        self.stand_knee_angle_deg_th = stand_knee_angle_deg_th
+        self.stand_streak_n = stand_streak_n
         self.phase_no_pose = phase_no_pose
         self.phase_have_pose = phase_have_pose
         self.phase_buffering = phase_buffering
@@ -92,8 +234,8 @@ class PlankWebSocketSession(BaseWebSocketSession):
             static_image_mode=False,
             model_complexity=1,
             enable_segmentation=False,
-            min_detection_confidence=self.mp_min_det_conf,
-            min_tracking_confidence=self.mp_min_track_conf,
+            min_detection_confidence=mp_min_det_conf,
+            min_tracking_confidence=mp_min_track_conf,
         )
 
     # ---------------------------------------------------------------
@@ -117,7 +259,6 @@ class PlankWebSocketSession(BaseWebSocketSession):
                 "Model not loaded (check MODEL_PATH)",
             )
 
-
     # ---------------------------------------------------------------
     # State factory and hooks (implement BaseWebSocketSession contract)
     # ---------------------------------------------------------------
@@ -128,7 +269,7 @@ class PlankWebSocketSession(BaseWebSocketSession):
 
     @property
     def _initial_status(self) -> str:
-        """Plank uses the configured NO_POSE phase as its initial/idle phase."""
+        """Wall-sit uses NO_POSE as its initial/idle phase."""
         return self.phase_no_pose
 
     async def _on_stop(self) -> None:
@@ -141,7 +282,8 @@ class PlankWebSocketSession(BaseWebSocketSession):
 
     def _reset_gate_and_buffers(self, reset_watchdog: bool) -> None:
         """Reset gate state, feature buffers, and optionally watchdogs."""
-        self.st.feats.clear()
+        self.st.foot_wall_vals.clear()
+        self.st.stand_streak = 0
         self.st.ready = False
         self.st.ready_streak = 0
         self.st.chosen_side = None
@@ -176,10 +318,7 @@ class PlankWebSocketSession(BaseWebSocketSession):
             return
 
         # Step 2: Check brightness
-        too_dark, brightness_mean = FrameQuality.is_too_dark(
-            frame,
-            self.dark_brightness_th,
-        )
+        too_dark, brightness_mean = FrameQuality.is_too_dark(frame, self.dark_brightness_th)
 
         # Step 3: Run pose detection
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -214,9 +353,7 @@ class PlankWebSocketSession(BaseWebSocketSession):
         # Not ready yet: HAVE_POSE phase
         if (not self.st.ready) and (self.st.ready_streak < self.ready_streak_n):
             await self.status.send_status(
-                self.ws,
-                self.st,
-                self.phase_have_pose,
+                self.ws, self.st, self.phase_have_pose,
                 {
                     "chosen_side": chosen_side,
                     "ready_streak": self.st.ready_streak,
@@ -230,42 +367,28 @@ class PlankWebSocketSession(BaseWebSocketSession):
         # First time ready: enter BUFFERING
         if (not self.st.ready) and (self.st.ready_streak >= self.ready_streak_n):
             self.st.ready = True
-            self.st.feats.clear()
+            self.st.foot_wall_vals.clear()
             self.st.last_sent_label = ""
             self.st.last_sent_conf = None
 
-            print(
-                f"[GATE] READY session_id={self.st.session_id} "
-                f"side={chosen_side}"
-            )
+            print(f"[GATE] READY session_id={self.st.session_id} side={chosen_side}")
             await self.status.send_info(
-                self.ws,
-                "Side View OK",
+                self.ws, "Side View OK",
                 {"session_id": self.st.session_id, "side": chosen_side},
             )
             await self.status.send_status(
-                self.ws,
-                self.st,
-                self.phase_buffering,
-                {
-                    "chosen_side": chosen_side,
-                    "window_fill": 0,
-                    "window_size": self.window_frames,
-                },
+                self.ws, self.st, self.phase_buffering,
+                {"chosen_side": chosen_side, "window_fill": 0, "window_size": self.window_frames},
                 force=True,
             )
 
         # Model not loaded or not ready: stay in BUFFERING
-        if (not self.model_svc.loaded) or (not self.st.ready) or (
-            self.st.chosen_side is None
-        ):
+        if (not self.model_svc.loaded) or (not self.st.ready) or (self.st.chosen_side is None):
             await self.status.send_status(
-                self.ws,
-                self.st,
-                self.phase_buffering,
+                self.ws, self.st, self.phase_buffering,
                 {
                     "chosen_side": self.st.chosen_side,
-                    "window_fill": len(self.st.feats),
+                    "window_fill": len(self.st.foot_wall_vals),
                     "window_size": self.window_frames,
                 },
             )
@@ -275,11 +398,10 @@ class PlankWebSocketSession(BaseWebSocketSession):
         feat_tuple = self.feat.extract_features(res, self.st.chosen_side)
 
         if feat_tuple is None:
-            self.st.feats.clear()
+            self.st.foot_wall_vals.clear()
+            self.st.stand_streak = 0
             await self.status.send_status(
-                self.ws,
-                self.st,
-                self.phase_buffering,
+                self.ws, self.st, self.phase_buffering,
                 {
                     "chosen_side": self.st.chosen_side,
                     "window_fill": 0,
@@ -288,36 +410,61 @@ class PlankWebSocketSession(BaseWebSocketSession):
             )
             return
 
-        self.st.feats.append(feat_tuple)
+        # Step 7: Standing gate — avoid predicting while standing upright
+        knee_angle = float(feat_tuple[1])
+        if knee_angle >= self.stand_knee_angle_deg_th:
+            self.st.stand_streak += 1
+        else:
+            self.st.stand_streak = 0
 
-        # Step 7: Check if enough frames for inference
-        if len(self.st.feats) < self.window_frames:
+        if self.st.stand_streak >= self.stand_streak_n:
+            if self.st.stand_streak == self.stand_streak_n:
+                print(
+                    f"[WALLSIT] STANDING gate: session_id={self.st.session_id} "
+                    f"side={self.st.chosen_side} knee_angle={knee_angle:.1f} th={self.stand_knee_angle_deg_th}"
+                )
+            self.st.foot_wall_vals.clear()
             await self.status.send_status(
-                self.ws,
-                self.st,
-                self.phase_buffering,
+                self.ws, self.st, self.phase_have_pose,
                 {
                     "chosen_side": self.st.chosen_side,
-                    "window_fill": len(self.st.feats),
+                    "ready_streak": self.st.ready_streak,
+                    "needed_streak": self.ready_streak_n,
+                    "window_fill": 0,
+                    "window_size": self.window_frames,
+                    "standing": True,
+                    "knee_angle": round(knee_angle, 1),
+                    "knee_th": self.stand_knee_angle_deg_th,
+                },
+            )
+            return
+
+        self.st.foot_wall_vals.append(feat_tuple)
+
+        # Step 8: Not enough frames yet: BUFFERING
+        if len(self.st.foot_wall_vals) < self.window_frames:
+            await self.status.send_status(
+                self.ws, self.st, self.phase_buffering,
+                {
+                    "chosen_side": self.st.chosen_side,
+                    "window_fill": len(self.st.foot_wall_vals),
                     "window_size": self.window_frames,
                 },
             )
             return
 
-        # Step 8: Run inference
+        # Step 9: Enough frames — run inference
         await self.status.send_status(
-            self.ws,
-            self.st,
-            self.phase_inferencing,
+            self.ws, self.st, self.phase_inferencing,
             {
                 "chosen_side": self.st.chosen_side,
-                "window_fill": len(self.st.feats),
+                "window_fill": len(self.st.foot_wall_vals),
                 "window_size": self.window_frames,
             },
         )
 
-        values = self.st.feats[-self.window_frames:]
-        agg_feat = self.feat.aggregate_window(values)
+        vals = self.st.foot_wall_vals[-self.window_frames:]
+        agg_feat = self.feat.aggregate_window(vals)
 
         pred_id, conf = self.model_svc.predict(agg_feat)
         pred_label = self.labels.label_of(pred_id)
@@ -325,7 +472,7 @@ class PlankWebSocketSession(BaseWebSocketSession):
         self.st.last_pred_label = pred_label
         self.st.last_pred_conf = conf
 
-        # Step 9: Send result
+        # Step 10: Send result
         payload: Dict[str, Any] = {
             "type": "result",
             "prediction": pred_label,
@@ -338,9 +485,9 @@ class PlankWebSocketSession(BaseWebSocketSession):
             print(f"[PRED] {payload}")
         await self.ws.send_text(json.dumps(payload))
 
-        # Step 10: Bound feature buffer to prevent unbounded growth
-        if len(self.st.feats) > (self.window_frames + 60):
-            self.st.feats = self.st.feats[-(self.window_frames + 60):]
+        # Bound feature buffer to prevent unbounded growth
+        if len(self.st.foot_wall_vals) > (self.window_frames + 60):
+            self.st.foot_wall_vals = self.st.foot_wall_vals[-(self.window_frames + 60):]
 
     # ---------------------------------------------------------------
     # Watchdog handlers
@@ -383,10 +530,7 @@ class PlankWebSocketSession(BaseWebSocketSession):
             await self.status.send_info(
                 self.ws,
                 "Please adjust your lights.",
-                {
-                    "brightness_mean": round(brightness_mean, 1),
-                    "brightness_th": self.dark_brightness_th,
-                },
+                {"brightness_mean": round(brightness_mean, 1), "brightness_th": self.dark_brightness_th},
             )
             self.st.dark_alerted = True
 
@@ -399,10 +543,7 @@ class PlankWebSocketSession(BaseWebSocketSession):
             await self.status.send_info(
                 self.ws,
                 "Adjust your camera to see your full body",
-                {
-                    "brightness_mean": round(brightness_mean, 1),
-                    "brightness_th": self.dark_brightness_th,
-                },
+                {"brightness_mean": round(brightness_mean, 1), "brightness_th": self.dark_brightness_th},
             )
             self.st.no_pose_alerted = True
 
@@ -410,9 +551,7 @@ class PlankWebSocketSession(BaseWebSocketSession):
         self._reset_gate_and_buffers(reset_watchdog=False)
 
         await self.status.send_status(
-            self.ws,
-            self.st,
-            self.phase_no_pose,
+            self.ws, self.st, self.phase_no_pose,
             {
                 "chosen_side": None,
                 "ready_streak": 0,

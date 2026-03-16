@@ -23,7 +23,6 @@ Run (from backend/):
 
 from __future__ import annotations
 
-import argparse
 import os
 import time
 import warnings
@@ -38,8 +37,9 @@ warnings.filterwarnings(
 
 import mediapipe as mp
 from fastapi import FastAPI, WebSocket
-from fastapi.middleware.cors import CORSMiddleware
 
+from shared.app_factory import make_app
+from shared.server_utils import serve
 from shared.sklearn_model_service import SklearnModelService
 from shared.label_mapper import LabelMapper
 from shared.side_gate import SideGate
@@ -65,7 +65,7 @@ WINDOW_FRAMES = 15          # frames per inference window
 READY_STREAK_N = 3          # consecutive side-view frames required
 VIS_TH = 0.80               # side landmark visibility threshold
 
-DEBUG = True
+DEBUG = False
 
 # MediaPipe confidence thresholds
 MP_MIN_DET_CONF = 0.80
@@ -96,15 +96,7 @@ DARK_BRIGHTNESS_TH = 55.0
 # FastAPI Application
 # ---------------------------------------------------------------
 
-app = FastAPI(title="FiT-AI Plank Streaming Backend")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = make_app("FiT-AI Plank Streaming Backend")
 
 
 # ---------------------------------------------------------------
@@ -178,26 +170,5 @@ async def ws_video(websocket: WebSocket) -> None:
 # Main
 # ---------------------------------------------------------------
 
-def main() -> None:
-    """Run server via uvicorn."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--serve", action="store_true", help="Run WebSocket server")
-    args = parser.parse_args()
-
-    if not args.serve:
-        args.serve = True
-
-    if args.serve:
-        import uvicorn
-
-        uvicorn.run(
-            "plank_streaming:app",
-            host="0.0.0.0",
-            port=5052,
-            reload=False,
-            log_level="info",
-        )
-
-
 if __name__ == "__main__":
-    main()
+    serve("plank.plank_streaming:app", port=5052)
