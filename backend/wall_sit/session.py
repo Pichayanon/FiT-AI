@@ -22,11 +22,11 @@ from shared.base_session import BaseWebSocketSession
 from shared.frame_decoder import FrameDecoder
 from shared.frame_quality import FrameQuality
 from shared.json_utils import parse_json
-from shared.math_utils import angle_3pts
 from shared.sklearn_model_service import SklearnModelService
 from shared.side_gate import SideGate
 from shared.label_mapper import LabelMapper
 from shared.status_sender import StatusSender
+from wall_sit.features import aggregate_window, extract_frame_features
 
 
 # ---------------------------------------------------------------
@@ -89,11 +89,6 @@ class WallSitFeatureExtractor:
     def __init__(self, mp_pose: Any) -> None:
         self.mp_pose = mp_pose
 
-    @staticmethod
-    def _angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
-        """Compute angle ABC (degrees) from 2D points."""
-        return angle_3pts(a, b, c)
-
     def extract_features(
         self, res: Any, side: str
     ) -> Optional[Tuple[float, float, float]]:
@@ -110,37 +105,7 @@ class WallSitFeatureExtractor:
         if not res.pose_landmarks:
             return None
 
-        lm = res.pose_landmarks.landmark
-
-        if side == "right":
-            hip = self.mp_pose.PoseLandmark.RIGHT_HIP
-            knee = self.mp_pose.PoseLandmark.RIGHT_KNEE
-            ankle = self.mp_pose.PoseLandmark.RIGHT_ANKLE
-            shoulder = self.mp_pose.PoseLandmark.RIGHT_SHOULDER
-        else:
-            hip = self.mp_pose.PoseLandmark.LEFT_HIP
-            knee = self.mp_pose.PoseLandmark.LEFT_KNEE
-            ankle = self.mp_pose.PoseLandmark.LEFT_ANKLE
-            shoulder = self.mp_pose.PoseLandmark.LEFT_SHOULDER
-
-        # Foot-wall distance normalized by shoulder width
-        shoulder_width = abs(
-            lm[self.mp_pose.PoseLandmark.LEFT_SHOULDER].x
-            - lm[self.mp_pose.PoseLandmark.RIGHT_SHOULDER].x
-        ) + 1e-6
-        foot_wall = abs(lm[ankle].x - lm[hip].x) / shoulder_width
-
-        # Knee angle (hip-knee-ankle)
-        knee_angle = self._angle(
-            [lm[hip].x, lm[hip].y],
-            [lm[knee].x, lm[knee].y],
-            [lm[ankle].x, lm[ankle].y],
-        )
-
-        # Torso alignment (shoulder-hip horizontal distance)
-        torso_alignment = abs(lm[shoulder].x - lm[hip].x)
-
-        return float(foot_wall), float(knee_angle), float(torso_alignment)
+        return extract_frame_features(res.pose_landmarks.landmark, side)
 
     @staticmethod
     def aggregate_window(vals: List[Tuple[float, float, float]]) -> np.ndarray:
@@ -149,17 +114,7 @@ class WallSitFeatureExtractor:
         Returns:
             Array of [mean_fw, std_fw, mean_knee, min_knee, mean_torso].
         """
-        fw = [v[0] for v in vals]
-        knee = [v[1] for v in vals]
-        torso = [v[2] for v in vals]
-
-        return np.array([
-            np.mean(fw),
-            np.std(fw),
-            np.mean(knee),
-            np.min(knee),
-            np.mean(torso),
-        ], dtype=np.float32)
+        return aggregate_window(vals)
 
 
 # ---------------------------------------------------------------

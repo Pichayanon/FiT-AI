@@ -1,7 +1,7 @@
 """
 Shared math utility functions for pose analysis.
 
-Provides angle computation, distance calculation, and other
+Provides angle computation, position normalization, distance calculation, and other
 geometric utilities used across all exercise feature extractors.
 """
 
@@ -42,6 +42,37 @@ def safe_norm(v: np.ndarray, eps: float = 1e-6) -> float:
         L2 norm plus eps.
     """
     return float(np.sqrt(np.sum(v * v)) + eps)
+
+
+def position_normalize(
+    value: float | np.ndarray,
+    center: float | np.ndarray = 0.5,
+    scale: float | np.ndarray = 0.5,
+    eps: float = 1e-6,
+) -> float | np.ndarray:
+    """Normalize a single x/y value or array of positions.
+
+    Uses the shared `(value - center) / scale` convention that appears across
+    the pose feature extractors. Defaults map MediaPipe-style image coordinates
+    from `[0, 1]` into roughly `[-1, 1]`.
+
+    Args:
+        value: Position value(s) to normalize.
+        center: Reference center to subtract before scaling.
+        scale: Reference scale used to normalize the offset.
+        eps: Small constant added to prevent division by zero.
+
+    Returns:
+        Normalized value(s) with the same scalar/array shape.
+    """
+    value_arr = np.asarray(value, dtype=np.float32)
+    center_arr = np.asarray(center, dtype=np.float32)
+    scale_arr = np.asarray(scale, dtype=np.float32)
+    normalized = (value_arr - center_arr) / (scale_arr + eps)
+
+    if normalized.ndim == 0:
+        return float(normalized)
+    return normalized.astype(np.float32)
 
 
 def dist(a: np.ndarray, b: np.ndarray) -> float:

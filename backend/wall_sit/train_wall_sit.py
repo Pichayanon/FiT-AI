@@ -17,7 +17,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from shared.math_utils import angle_3pts, safe_norm, dist, get_xyz
+from wall_sit.features import aggregate_window, extract_frame_features
 
 # -----------------------------
 # Config
@@ -66,9 +66,7 @@ class WallSitFeatureExtractor:
     def extract(self, video_path: str) -> Optional[List[float]]:
         cap = cv2.VideoCapture(video_path)
 
-        foot_wall_vals: List[float] = []
-        knee_angles: List[float] = []
-        torso_alignments: List[float] = []
+        frame_features: List[Tuple[float, float, float]] = []
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -84,52 +82,15 @@ class WallSitFeatureExtractor:
 
             right_vis = lm[mp_pose.PoseLandmark.RIGHT_HIP].visibility
             left_vis = lm[mp_pose.PoseLandmark.LEFT_HIP].visibility
-            is_right = right_vis > left_vis
-
-            if is_right:
-                hip = lm[mp_pose.PoseLandmark.RIGHT_HIP]
-                knee = lm[mp_pose.PoseLandmark.RIGHT_KNEE]
-                ankle = lm[mp_pose.PoseLandmark.RIGHT_ANKLE]
-                shoulder = lm[mp_pose.PoseLandmark.RIGHT_SHOULDER]
-            else:
-                hip = lm[mp_pose.PoseLandmark.LEFT_HIP]
-                knee = lm[mp_pose.PoseLandmark.LEFT_KNEE]
-                ankle = lm[mp_pose.PoseLandmark.LEFT_ANKLE]
-                shoulder = lm[mp_pose.PoseLandmark.LEFT_SHOULDER]
-
-            hip_w = dist(lm[mp_pose.PoseLandmark.LEFT_HIP].x, lm[mp_pose.PoseLandmark.RIGHT_HIP].x)
-            sho_w = dist(lm[mp_pose.PoseLandmark.LEFT_SHOULDER].x, lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].x)
-            scale = hip_w if hip_w > 1e-6 else (sho_w if sho_w > 1e-6 else 1e-6)
-
-            # Foot to wall distance (horizontal)
-            foot_wall_dist = dist(ankle.x, hip.x)
-            foot_wall_dist_norm = foot_wall_dist / scale
-            foot_wall_vals.append(foot_wall_norm)
-
-            # Knee angle
-            knee_angle = angle_3pts([hip.x, hip.y],[knee.x, knee.y],[ankle.x, ankle.y])
-            knee_angle_norm = knee_angle / 180
-            knee_angles.append(knee_angle_norm)
-
-            # Torso alignment (back against wall)
-            torso_align = dist(shoulder.x, hip.x)
-            torso_align_norm = torso_align / 180
-            torso_alignments.append(torso_align_norm)
+            side = "right" if right_vis > left_vis else "left"
+            frame_features.append(extract_frame_features(lm, side))
 
         cap.release()
 
-        if not foot_wall_vals:
+        if not frame_features:
             return None
 
-        feat = [
-            float(np.mean(foot_wall_vals)),
-            float(np.std(foot_wall_vals)),
-            float(np.mean(knee_angles)),
-            float(np.min(knee_angles)),
-            float(np.mean(torso_alignments)),
-        ]
-
-        return feat
+        return aggregate_window(frame_features).tolist()
 
 
 class WallSitTrainer:
