@@ -2,16 +2,10 @@ import SwiftUI
 
 /// Profile editing screen with form fields for name, age, weight, height, and sign-out.
 struct EditProfileView: View {
-    @ObservedObject var authService: AuthService
-    @ObservedObject var profileService: ProfileService
-    @StateObject private var viewModel: EditProfileViewModel
+    @EnvironmentObject private var authService: AuthService
+    @EnvironmentObject private var profileService: ProfileService
+    @StateObject private var viewModel = EditProfileViewModel()
     @Environment(\.dismiss) private var dismiss
-
-    init(authService: AuthService, profileService: ProfileService) {
-        self.authService = authService
-        self.profileService = profileService
-        _viewModel = StateObject(wrappedValue: EditProfileViewModel(profileService: profileService))
-    }
 
     var body: some View {
         ScrollView {
@@ -40,7 +34,7 @@ struct EditProfileView: View {
                 .padding(.horizontal, 4)
 
                 Button(action: {
-                    Task { await viewModel.save() }
+                    Task { await viewModel.save(using: profileService) }
                 }) {
                     Group {
                         if profileService.isSaving {

@@ -138,6 +138,62 @@ enum WorkoutTextFormatter {
     }
 }
 
+// MARK: - Session Video Storage
+
+/// Resolves local file locations for session recordings saved on this device.
+enum SessionVideoStore {
+    private static let folderName = "SessionVideos"
+
+    /// Returns the folder used to store recorded workout sessions.
+    static func recordingsDirectory() -> URL? {
+        guard let baseDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+
+        let directory = baseDirectory.appendingPathComponent(folderName, isDirectory: true)
+
+        if !FileManager.default.fileExists(atPath: directory.path) {
+            do {
+                try FileManager.default.createDirectory(
+                    at: directory,
+                    withIntermediateDirectories: true,
+                    attributes: nil
+                )
+            } catch {
+                print("[SessionVideoStore] Create directory error: \(error)")
+                return nil
+            }
+        }
+
+        return directory
+    }
+
+    /// Creates a new unique output URL for an upcoming session recording.
+    static func makeRecordingURL() -> URL? {
+        recordingsDirectory()?.appendingPathComponent("session-\(UUID().uuidString).mov")
+    }
+
+    /// Resolves a saved file name into a local file URL if the file still exists.
+    static func recordingURL(for fileName: String?) -> URL? {
+        guard let fileName,
+              let directory = recordingsDirectory() else { return nil }
+
+        let url = directory.appendingPathComponent(fileName)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Deletes a previously recorded local session file, if present.
+    static func deleteRecording(fileName: String?) {
+        guard let url = recordingURL(for: fileName) else { return }
+
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            print("[SessionVideoStore] Delete error: \(error)")
+        }
+    }
+}
+
 // MARK: - Progress / Summary Display Models
 
 /// Represents daily calorie data for the weekly chart.
@@ -223,6 +279,7 @@ struct SessionSummary {
     let items: [ExerciseSummaryItem]
     let totalTimeSeconds: Int
     let estimatedCalories: Int
+    let sessionVideoFileName: String?
 }
 
 // MARK: - Firestore Workout History (Codable for persistence)
@@ -262,6 +319,7 @@ struct WorkoutSessionRecord: Codable {
     let totalTimeSeconds: Int
     let estimatedCalories: Int
     let exercises: [ExerciseRecord]
+    let sessionVideoFileName: String?
 }
 
 // MARK: - WorkoutSessionRecord Firestore Deserialization
@@ -275,7 +333,16 @@ extension WorkoutSessionRecord {
               let estimatedCalories = data["estimatedCalories"] as? Int else { return nil }
         let completedAtSeconds: Double = (data["completedAtSeconds"] as? Double) ?? (data["completedAtSeconds"] as? Int).map { Double($0) } ?? 0
         let exercises: [ExerciseRecord] = (data["exercises"] as? [[String: Any]])?.compactMap { ExerciseRecord(from: $0) } ?? []
-        self.init(userId: userId, setTitle: setTitle, completedAtSeconds: completedAtSeconds, totalTimeSeconds: totalTimeSeconds, estimatedCalories: estimatedCalories, exercises: exercises)
+        let sessionVideoFileName = data["sessionVideoFileName"] as? String
+        self.init(
+            userId: userId,
+            setTitle: setTitle,
+            completedAtSeconds: completedAtSeconds,
+            totalTimeSeconds: totalTimeSeconds,
+            estimatedCalories: estimatedCalories,
+            exercises: exercises,
+            sessionVideoFileName: sessionVideoFileName
+        )
     }
 }
 
@@ -377,7 +444,8 @@ extension SessionSummary {
             completedAtSeconds: Date().timeIntervalSince1970,
             totalTimeSeconds: totalTimeSeconds,
             estimatedCalories: estimatedCalories,
-            exercises: exercises
+            exercises: exercises,
+            sessionVideoFileName: sessionVideoFileName
         )
     }
 }

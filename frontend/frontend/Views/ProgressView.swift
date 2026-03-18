@@ -231,6 +231,7 @@ private struct HistoryRow: View {
 /// Detailed view for a past workout session, showing per-exercise stats and errors.
 struct HistoryDetailView: View {
     let item: WorkoutHistoryItem
+    @State private var selectedPlayback: SessionMistakePlayback?
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -276,7 +277,11 @@ struct HistoryDetailView: View {
 
                 LazyVStack(spacing: 12) {
                     ForEach(Array(item.record.exercises.enumerated()), id: \.offset) { _, ex in
-                        HistoryExerciseCard(exercise: ex)
+                        HistoryExerciseCard(
+                            exercise: ex,
+                            videoURL: SessionVideoStore.recordingURL(for: item.record.sessionVideoFileName),
+                            selectedPlayback: $selectedPlayback
+                        )
                     }
                 }
                 .padding(.bottom, 32)
@@ -287,6 +292,9 @@ struct HistoryDetailView: View {
         .navigationTitle(item.setTitle)
         .navigationBarTitleDisplayMode(.inline)
         .foregroundColor(.white)
+        .sheet(item: $selectedPlayback) { playback in
+            SessionVideoPlaybackView(playback: playback)
+        }
     }
 }
 
@@ -295,6 +303,8 @@ struct HistoryDetailView: View {
 /// Card showing detailed stats for one exercise in a past session.
 private struct HistoryExerciseCard: View {
     let exercise: ExerciseRecord
+    let videoURL: URL?
+    @Binding var selectedPlayback: SessionMistakePlayback?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -330,24 +340,6 @@ private struct HistoryExerciseCard: View {
                         .font(.caption)
                         .foregroundColor(.gray)
                 }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Mistake timeline")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.gray)
-                    if exercise.mistakes.isEmpty {
-                        Text("No mistake records")
-                            .font(.subheadline)
-                            .foregroundColor(.gray.opacity(0.7))
-                    } else {
-                        ForEach(Array(exercise.mistakes.enumerated()), id: \.offset) { _, event in
-                            Text(formatMistakeTimeline(event))
-                                .font(.subheadline)
-                                .foregroundColor(.orange.opacity(0.95))
-                        }
-                    }
-                }
             } else {
                 if let dur = exercise.durationSeconds, let tgt = exercise.targetSeconds {
                     ProgressBarView(
@@ -360,6 +352,56 @@ private struct HistoryExerciseCard: View {
                         .font(.subheadline)
                         .fontWeight(.medium)
                         .foregroundColor(.white)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Mistake timeline")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.gray)
+                if exercise.mistakes.isEmpty {
+                    Text("No mistake records")
+                        .font(.subheadline)
+                        .foregroundColor(.gray.opacity(0.7))
+                } else {
+                    ForEach(Array(exercise.mistakes.enumerated()), id: \.offset) { _, event in
+                        if let videoURL {
+                            Button {
+                                selectedPlayback = makePlayback(for: event, videoURL: videoURL)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(formatMistakeTimeline(event))
+                                            .font(.subheadline)
+                                            .foregroundColor(.orange.opacity(0.95))
+                                        Text("Tap to replay this mistake")
+                                            .font(.caption)
+                                            .foregroundColor(.gray)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "play.circle.fill")
+                                        .font(.title3)
+                                        .foregroundColor(.yellow)
+                                }
+                                .padding(.vertical, 8)
+                                .padding(.horizontal, 10)
+                                .background(Color.white.opacity(0.04))
+                                .cornerRadius(12)
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Text(formatMistakeTimeline(event))
+                                .font(.subheadline)
+                                .foregroundColor(.orange.opacity(0.95))
+                        }
+                    }
+
+                    if videoURL == nil {
+                        Text("Video unavailable for this session")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
                 }
             }
 
@@ -391,5 +433,21 @@ private struct HistoryExerciseCard: View {
             return "\u{2022} \(event.reason) — Rep \(rep)"
         }
         return "\u{2022} \(event.reason)"
+    }
+
+    private func makePlayback(for event: MistakeEventRecord, videoURL: URL) -> SessionMistakePlayback {
+        let subtitle: String
+        if let rep = event.repNumber {
+            subtitle = "\(exercise.name) • Rep \(rep)"
+        } else {
+            subtitle = exercise.name
+        }
+
+        return SessionMistakePlayback(
+            title: event.reason,
+            subtitle: subtitle,
+            videoURL: videoURL,
+            atSecond: event.atSecond
+        )
     }
 }

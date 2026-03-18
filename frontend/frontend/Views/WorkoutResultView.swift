@@ -3,6 +3,7 @@ import SwiftUI
 /// Displays the post-workout result screen with exercise summaries, stats, and error details.
 struct WorkoutResultView: View {
     @StateObject private var viewModel: WorkoutResultViewModel
+    @State private var selectedPlayback: SessionMistakePlayback?
     @Environment(\.dismiss) private var dismiss
     private let onBackToHome: (() -> Void)?
 
@@ -42,7 +43,11 @@ struct WorkoutResultView: View {
 
                     LazyVStack(spacing: 12) {
                         ForEach(viewModel.summary.items) { item in
-                            SummaryExerciseCard(item: item)
+                            SummaryExerciseCard(
+                                item: item,
+                                videoURL: viewModel.recordingURL,
+                                selectedPlayback: $selectedPlayback
+                            )
                         }
                     }
                     .padding(.bottom, 32)
@@ -73,6 +78,9 @@ struct WorkoutResultView: View {
             .background(Color.black)
         }
         .background(Color.black.ignoresSafeArea())
+        .sheet(item: $selectedPlayback) { playback in
+            SessionVideoPlaybackView(playback: playback)
+        }
     }
 }
 
@@ -105,6 +113,8 @@ fileprivate struct StatPill: View {
 /// Card displaying detailed stats for one exercise (reps/hold, errors, mistake timeline).
 fileprivate struct SummaryExerciseCard: View {
     let item: ExerciseSummaryItem
+    let videoURL: URL?
+    @Binding var selectedPlayback: SessionMistakePlayback?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -142,10 +152,15 @@ fileprivate struct SummaryExerciseCard: View {
                             .foregroundColor(.gray)
                     }
                     ErrorsBlock(errors: errors)
-                    MistakesBlock(mistakes: mistakes)
+                    MistakesBlock(
+                        exerciseName: item.displayName,
+                        mistakes: mistakes,
+                        videoURL: videoURL,
+                        selectedPlayback: $selectedPlayback
+                    )
                 }
 
-            case .isometric(_, let durationSeconds, let targetSeconds, let errors, _):
+            case .isometric(_, let durationSeconds, let targetSeconds, let errors, let mistakes):
                 VStack(alignment: .leading, spacing: 8) {
                     ProgressBarView(
                         progress: targetSeconds > 0 ? durationSeconds / targetSeconds : 0,
@@ -158,6 +173,12 @@ fileprivate struct SummaryExerciseCard: View {
                         .fontWeight(.medium)
                         .foregroundColor(.white)
                     ErrorsBlock(errors: errors)
+                    MistakesBlock(
+                        exerciseName: item.displayName,
+                        mistakes: mistakes,
+                        videoURL: videoURL,
+                        selectedPlayback: $selectedPlayback
+                    )
                 }
             }
         }
@@ -202,7 +223,10 @@ fileprivate struct ErrorsBlock: View {
 
 /// Lists timestamped mistake events, or a "no mistakes" message if empty.
 fileprivate struct MistakesBlock: View {
+    let exerciseName: String
     let mistakes: [MistakeEvent]
+    let videoURL: URL?
+    @Binding var selectedPlayback: SessionMistakePlayback?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -216,9 +240,41 @@ fileprivate struct MistakesBlock: View {
                     .foregroundColor(.gray.opacity(0.7))
             } else {
                 ForEach(mistakes) { event in
-                    Text(mistakeTimelineText(event))
-                        .font(.subheadline)
-                        .foregroundColor(.orange.opacity(0.95))
+                    if let videoURL {
+                        Button {
+                            selectedPlayback = makePlayback(for: event, videoURL: videoURL)
+                        } label: {
+                            HStack(spacing: 10) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(mistakeTimelineText(event))
+                                        .font(.subheadline)
+                                        .foregroundColor(.orange.opacity(0.95))
+                                    Text("Tap to replay this mistake")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                                Spacer()
+                                Image(systemName: "play.circle.fill")
+                                    .font(.title3)
+                                    .foregroundColor(.yellow)
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 10)
+                            .background(Color.white.opacity(0.04))
+                            .cornerRadius(12)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Text(mistakeTimelineText(event))
+                            .font(.subheadline)
+                            .foregroundColor(.orange.opacity(0.95))
+                    }
+                }
+
+                if videoURL == nil {
+                    Text("Video unavailable for this session")
+                        .font(.caption)
+                        .foregroundColor(.gray)
                 }
             }
         }
@@ -229,5 +285,21 @@ fileprivate struct MistakesBlock: View {
             return "\u{2022} \(event.reason) -- Rep \(rep)"
         }
         return "\u{2022} \(event.reason)"
+    }
+
+    private func makePlayback(for event: MistakeEvent, videoURL: URL) -> SessionMistakePlayback {
+        let subtitle: String
+        if let rep = event.repNumber {
+            subtitle = "\(exerciseName) • Rep \(rep)"
+        } else {
+            subtitle = exerciseName
+        }
+
+        return SessionMistakePlayback(
+            title: event.reason,
+            subtitle: subtitle,
+            videoURL: videoURL,
+            atSecond: event.atSecond
+        )
     }
 }

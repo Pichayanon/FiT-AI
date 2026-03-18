@@ -2,6 +2,10 @@ import Foundation
 import SwiftUI
 
 /// Manages form state for the edit profile screen and handles save operations.
+///
+/// This ViewModel is intentionally free of service dependencies so it can be
+/// created as a @StateObject without needing @EnvironmentObject values at init
+/// time. The caller passes the service explicitly to `save(using:)`.
 @MainActor
 final class EditProfileViewModel: ObservableObject {
     @Published var name: String = ""
@@ -9,12 +13,7 @@ final class EditProfileViewModel: ObservableObject {
     @Published var weight: String = ""
     @Published var height: String = ""
 
-    private let profileService: ProfileService
-
-    init(profileService: ProfileService) {
-        self.profileService = profileService
-        fillFromProfile(profileService.currentProfile)
-    }
+    init() {}
 
     /// Populates form fields from an existing profile, or clears them if nil.
     func fillFromProfile(_ profile: UserProfile?) {
@@ -31,8 +30,8 @@ final class EditProfileViewModel: ObservableObject {
         height = p.height
     }
 
-    /// Saves the current form values to Firestore via the profile service.
-    func save() async {
+    /// Saves the current form values to Firestore via the provided profile service.
+    func save(using profileService: ProfileService) async {
         let profile = UserProfile(name: name, age: age, weight: weight, height: height)
         await profileService.save(profile)
     }

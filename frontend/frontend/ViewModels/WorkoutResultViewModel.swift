@@ -14,4 +14,9 @@ final class WorkoutResultViewModel: ObservableObject {
     var formattedTotalTime: String {
         WorkoutTextFormatter.minuteSecondString(for: summary.totalTimeSeconds)
     }
+
+    /// Local video file for this session, if the recording is still available on device.
+    var recordingURL: URL? {
+        SessionVideoStore.recordingURL(for: summary.sessionVideoFileName)
+    }
 }

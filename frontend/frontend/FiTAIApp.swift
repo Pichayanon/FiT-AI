@@ -3,6 +3,9 @@ import FirebaseCore
 
 /// Root application entry point. Configures Firebase and routes between Login and Home
 /// based on the current authentication state.
+///
+/// Both `authService` and `profileService` are injected as environment objects so that
+/// any descendant view can access them without prop-drilling through intermediate views.
 @main
 struct FiTAIApp: App {
     @StateObject private var authService = AuthService()
@@ -18,9 +21,11 @@ struct FiTAIApp: App {
                 if authService.currentUser == nil {
                     LoginView(authService: authService)
                 } else {
-                    HomeView(authService: authService, profileService: profileService)
+                    HomeView()
                 }
             }
+            .environmentObject(authService)
+            .environmentObject(profileService)
         }
     }
 }

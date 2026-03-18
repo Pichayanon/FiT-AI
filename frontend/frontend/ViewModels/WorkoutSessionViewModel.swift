@@ -182,6 +182,7 @@ final class WorkoutSessionViewModel: ObservableObject {
     @Published var startTime = Date()
     @Published var navigateToResult = false
     @Published var isSessionRunning = false
+    @Published var isFinalizingSession = false
     @Published var backendState: String = BackendPhase.NO_POSE.rawValue
 
     // Squat speech control
@@ -217,7 +218,12 @@ final class WorkoutSessionViewModel: ObservableObject {
     @Published var mode: WorkoutSessionMode = .wallSit
 
     /// Session summary populated when the session finishes; drives the result screen.
-    @Published var sessionSummary: SessionSummary = SessionSummary(items: [], totalTimeSeconds: 0, estimatedCalories: 0)
+    @Published var sessionSummary: SessionSummary = SessionSummary(
+        items: [],
+        totalTimeSeconds: 0,
+        estimatedCalories: 0,
+        sessionVideoFileName: nil
+    )
 
     // MARK: - Error Trackers (per-exercise)
 
@@ -315,23 +321,27 @@ final class WorkoutSessionViewModel: ObservableObject {
     /// Called when the session view disappears. Stops session and camera.
     func onDisappear() {
         stopSession()
-        cameraManager.stopSession()
+        cameraManager.stopSession(discardRecording: !navigateToResult)
     }
 
     // MARK: - Session Control
 
     /// Starts the workout session: connects to the backend, resets counters, begins streaming.
     func startSession() {
+        guard !isFinalizingSession else { return }
+
         withAnimation(.easeInOut(duration: 0.2)) {
             isSessionRunning = true
         }
 
         startTime = Date()
+        isFinalizingSession = false
         backendState = BackendPhase.NO_POSE.rawValue
         feedback = "Streaming to backend..."
 
         resetSessionState()
 
+        cameraManager.beginSessionRecording()
         cameraManager.startStreaming(to: activeWSURL)
         speech.speak("Session started", language: speechLang, minInterval: 0)
         scheduleDemoInstructionIfNeeded(for: mode)
@@ -398,11 +408,22 @@ final class WorkoutSessionViewModel: ObservableObject {
 
     /// Finishes the workout session: stops streaming, builds summary, saves to history, navigates to results.
     func finishSession() {
+        guard isSessionRunning, !isFinalizingSession else { return }
+
+        isFinalizingSession = true
         stopSession()
         speech.speak("Session complete", language: speechLang, minInterval: 0)
-        sessionSummary = buildSessionSummary()
-        Task { await workoutHistory.saveSession(summary: sessionSummary, setTitle: setTitle) }
-        navigateToResult = true
+        feedback = "Saving summary..."
+
+        cameraManager.finishSessionRecording { [weak self] url in
+            guard let self else { return }
+
+            let videoFileName = url?.lastPathComponent
+            self.sessionSummary = self.buildSessionSummary(sessionVideoFileName: videoFileName)
+            Task { await self.workoutHistory.saveSession(summary: self.sessionSummary, setTitle: self.setTitle) }
+            self.isFinalizingSession = false
+            self.navigateToResult = true
+        }
     }
 
     // MARK: - Timer Handlers
@@ -836,7 +857,7 @@ final class WorkoutSessionViewModel: ObservableObject {
     // MARK: - Session Summary Builder
 
     /// Builds the complete session summary from accumulated exercise data.
-    private func buildSessionSummary() -> SessionSummary {
+    private func buildSessionSummary(sessionVideoFileName: String? = nil) -> SessionSummary {
         let totalTime = Int(Date().timeIntervalSince(startTime))
         var calories = max(0, correctReps) * 4
         if initialMode == .plank {
@@ -892,7 +913,12 @@ final class WorkoutSessionViewModel: ObservableObject {
             ))
         }
 
-        return SessionSummary(items: items, totalTimeSeconds: totalTime, estimatedCalories: calories)
+        return SessionSummary(
+            items: items,
+            totalTimeSeconds: totalTime,
+            estimatedCalories: calories,
+            sessionVideoFileName: sessionVideoFileName
+        )
     }
 
     /// Converts an error count dictionary into sorted `ErrorCount` display models.

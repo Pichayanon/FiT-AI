@@ -2,8 +2,8 @@ import SwiftUI
 
 /// Home screen displaying a greeting, navigation buttons, and available workout programs.
 struct HomeView: View {
-    @ObservedObject var authService: AuthService
-    @ObservedObject var profileService: ProfileService
+    @EnvironmentObject private var authService: AuthService
+    @EnvironmentObject private var profileService: ProfileService
     @StateObject private var viewModel = HomeViewModel()
 
     /// Resolves the display name: profile name first, then auth display name, then fallback.
@@ -29,7 +29,7 @@ struct HomeView: View {
                                 .foregroundColor(.gray)
                         }
                         Spacer()
-                        NavigationLink(destination: EditProfileView(authService: authService, profileService: profileService)) {
+                        NavigationLink(destination: EditProfileView()) {
                             Image(systemName: "person.circle.fill")
                                 .font(.largeTitle)
                                 .foregroundColor(.white)
@@ -127,5 +127,7 @@ fileprivate struct WorkoutSetCard: View {
 }
 
 #Preview {
-    HomeView(authService: AuthService(), profileService: ProfileService())
+    HomeView()
+        .environmentObject(AuthService())
+        .environmentObject(ProfileService())
 }

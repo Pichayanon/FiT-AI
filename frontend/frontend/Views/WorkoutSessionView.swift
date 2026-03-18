@@ -54,7 +54,7 @@ struct WorkoutSessionView: View {
                     Spacer()
 
                     // Massive Center Feedback Text
-                    if viewModel.isSessionRunning && !viewModel.feedback.isEmpty {
+                    if (viewModel.isSessionRunning || viewModel.isFinalizingSession) && !viewModel.feedback.isEmpty {
                         Text(viewModel.feedback)
                             .font(.system(size: 42, weight: .heavy, design: .rounded))
                             .foregroundColor(.white)
@@ -73,7 +73,7 @@ struct WorkoutSessionView: View {
                         .padding(.bottom, 16)
                 }
 
-                if !viewModel.isSessionRunning {
+                if !viewModel.isSessionRunning && !viewModel.isFinalizingSession {
                     guideCenterOverlay
                         .transition(.opacity)
                 }
@@ -192,21 +192,24 @@ struct WorkoutSessionView: View {
             progressCard
 
             Button {
-                if viewModel.isSessionRunning {
+                if viewModel.isFinalizingSession {
+                    return
+                } else if viewModel.isSessionRunning {
                     viewModel.finishSession()
                 } else {
                     viewModel.startSession()
                 }
             } label: {
-                Text(viewModel.isSessionRunning ? "End Workout" : "Start Workout")
+                Text(buttonTitle)
                     .font(.headline.weight(.bold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
-                    .foregroundColor(viewModel.isSessionRunning ? .white : .black)
-                    .background(viewModel.isSessionRunning ? Color.red.gradient : Color.yellow.gradient)
+                    .foregroundColor(buttonForegroundColor)
+                    .background(buttonBackgroundColor.gradient)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .shadow(color: (viewModel.isSessionRunning ? Color.red : Color.yellow).opacity(0.3), radius: 10, x: 0, y: 5)
+                    .shadow(color: buttonShadowColor.opacity(0.3), radius: 10, x: 0, y: 5)
             }
+            .disabled(viewModel.isFinalizingSession)
         }
     }
 
@@ -269,6 +272,26 @@ struct WorkoutSessionView: View {
     private var plankTitleText: String {
         if viewModel.passedPlank { return "PASSED" }
         return "Plank Goal"
+    }
+
+    private var buttonTitle: String {
+        if viewModel.isFinalizingSession { return "Saving summary..." }
+        return viewModel.isSessionRunning ? "End Workout" : "Start Workout"
+    }
+
+    private var buttonForegroundColor: Color {
+        if viewModel.isFinalizingSession { return .white }
+        return viewModel.isSessionRunning ? .white : .black
+    }
+
+    private var buttonBackgroundColor: Color {
+        if viewModel.isFinalizingSession { return .gray }
+        return viewModel.isSessionRunning ? .red : .yellow
+    }
+
+    private var buttonShadowColor: Color {
+        if viewModel.isFinalizingSession { return .gray }
+        return viewModel.isSessionRunning ? .red : .yellow
     }
 
     // MARK: - Guide Overlay Selection
