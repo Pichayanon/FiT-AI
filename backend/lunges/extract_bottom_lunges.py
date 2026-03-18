@@ -17,6 +17,14 @@ Output: dataset/lunges/dataset_bottom/<vidname>_<label>_snip<NNN>.npz
 """
 from __future__ import annotations
 
+if __package__ in {None, ""}:
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+
 import argparse
 import glob
 import os
@@ -27,6 +35,8 @@ from typing import Deque, List, Optional, Tuple
 import cv2
 import mediapipe as mp
 import numpy as np
+
+from lunges.features import LandmarkSmoother
 
 
 # -----------------------------
@@ -290,6 +300,8 @@ def process_one_video(video_path: str, args: argparse.Namespace) -> int:
         min_gap=args.min_gap,
     )
 
+    smoother = LandmarkSmoother(alpha=0.6)
+
     hist_len = args.pre + 60
     frame_hist: Deque[np.ndarray] = deque(maxlen=hist_len)
     kpt_hist: Deque[Optional[np.ndarray]] = deque(maxlen=hist_len)
@@ -323,6 +335,7 @@ def process_one_video(video_path: str, args: argparse.Namespace) -> int:
             if res.pose_landmarks:
                 lm = res.pose_landmarks.landmark
                 kpts = landmarks_to_array(lm)
+                kpts = smoother.update(kpts)
                 knee_deg, knee_l, knee_r = compute_knee_angle_avg(lm, mp_pose)
 
                 mp_draw.draw_landmarks(
@@ -420,9 +433,11 @@ def main() -> None:
     for i, vp in enumerate(video_paths, 1):
         print(f"\n[{i}/{len(video_paths)}] {os.path.basename(vp)}")
         n = process_one_video(vp, args)
+        print(f"  -> {n} snippet(s)")
         total_snips += n
 
-    print(f"\n[DONE] Total: {total_snips} snippets.")
+    print(f"\n[DONE] Total: {total_snips} snippet(s) from {len(video_paths)} video(s)")
+    print(f"[DONE] Output folder: {args.outdir}")
 
 if __name__ == "__main__":
     main()

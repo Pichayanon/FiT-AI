@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+if __package__ in {None, ""}:
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import argparse
 import json
 import os
@@ -8,6 +14,8 @@ from typing import Dict, List
 import cv2
 import mediapipe as mp
 import numpy as np
+
+from lunges.features import PHASE_FEATURE_DIM, extract_phase_features
 
 
 # -----------------------------
@@ -19,104 +27,8 @@ PHASE_MAP = {
     "concentric": 1,
 }
 
-IMPORTANT_LANDMARKS = {
-    "l_shoulder": 11,
-    "r_shoulder": 12,
-    "l_hip": 23,
-    "r_hip": 24,
-    "l_knee": 25,
-    "r_knee": 26,
-    "l_ankle": 27,
-    "r_ankle": 28,
-    "l_heel": 29,
-    "r_heel": 30,
-    "l_foot": 31,
-    "r_foot": 32,
-}
-
-# Keep this consistent with extract_features() output length.
-FEATURE_DIM = 6
-
-
-# -----------------------------
-# Geometry Helpers
-# -----------------------------
-
-
-def angle_2d(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
-    ba = a - b
-    bc = c - b
-
-    cos_angle = np.dot(ba, bc) / (
-        np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6
-    )
-
-    return np.degrees(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
-
-
-# -----------------------------
-# Feature Extraction
-# -----------------------------
-
-
-def extract_features(lm, prev_vals=None):
-
-    pts = {}
-
-    for name, idx in IMPORTANT_LANDMARKS.items():
-        pts[name] = np.array([lm[idx].x, lm[idx].y], dtype=np.float32)
-
-    # -------------------------
-    # Torso normalization
-    # -------------------------
-
-    mid_hip = (pts["l_hip"] + pts["r_hip"]) / 2
-    mid_shoulder = (pts["l_shoulder"] + pts["r_shoulder"]) / 2
-    mid_knee = (pts["l_knee"] + pts["r_knee"]) / 2
-
-    torso_len = abs(mid_shoulder[1] - mid_hip[1]) + 1e-6
-
-    def ny(p):
-        return (p[1] - mid_hip[1]) / torso_len
-
-    # -------------------------
-    # Heights
-    # -------------------------
-
-    hip_h = ny(mid_hip)
-    shoulder_h = ny(mid_shoulder)
-    knee_h = ny(mid_knee)
-
-    # -------------------------
-    # Velocities
-    # -------------------------
-
-    if prev_vals is None:
-        hip_v = 0.0
-        shoulder_v = 0.0
-        knee_v = 0.0
-    else:
-        hip_v = hip_h - prev_vals[0]
-        shoulder_v = shoulder_h - prev_vals[1]
-        knee_v = knee_h - prev_vals[2]
-
-    # -------------------------
-    # Feature vector
-    # -------------------------
-
-    features = np.array(
-        [
-            hip_h,
-            shoulder_h,
-            knee_h,
-            hip_v,
-            shoulder_v,
-            knee_v,
-        ],
-        dtype=np.float32,
-    )
-
-    return features, (hip_h, shoulder_h, knee_h)
+# Keep this consistent with lunges.features.extract_phase_features().
+FEATURE_DIM = PHASE_FEATURE_DIM
 
 
 # -----------------------------
@@ -189,8 +101,8 @@ def main():
         os.path.basename(args.video)
     )[0]
 
-    with open(args.labels, "r") as f:
-        raw_ranges: Dict[str, List[List[int]]] = json.load(f)
+    with open(args.labels, "r") as label_file:
+        raw_ranges: Dict[str, List[List[int]]] = json.load(label_file)
 
     label_ranges = {
         "eccentric": [],
@@ -232,7 +144,7 @@ def main():
     labels_seq = []
     mask_seq = []
 
-    prev_vals = None
+    previous_height_values = None
 
     with mp_pose.Pose(
         static_image_mode=False,
@@ -255,31 +167,31 @@ def main():
                 cv2.COLOR_BGR2RGB,
             )
 
-            res = pose.process(rgb)
+            pose_result = pose.process(rgb)
 
             label = frame_to_label(frame_idx)
 
-            if res.pose_landmarks:
+            if pose_result.pose_landmarks:
 
-                feats, prev_vals = extract_features(
-                    res.pose_landmarks.landmark,
-                    prev_vals,
+                frame_feature_vector, previous_height_values = extract_phase_features(
+                    pose_result.pose_landmarks.landmark,
+                    previous_height_values,
                 )
 
                 mask = 1
 
                 mp_draw.draw_landmarks(
                     frame,
-                    res.pose_landmarks,
+                    pose_result.pose_landmarks,
                     mp_pose.POSE_CONNECTIONS,
                 )
 
             else:
 
-                feats = np.zeros((FEATURE_DIM,), dtype=np.float32)
+                frame_feature_vector = np.zeros((FEATURE_DIM,), dtype=np.float32)
                 mask = 0
 
-            features_seq.append(feats)
+            features_seq.append(frame_feature_vector)
             labels_seq.append(label)
             mask_seq.append(mask)
 

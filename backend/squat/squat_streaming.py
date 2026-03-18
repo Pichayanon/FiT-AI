@@ -24,6 +24,12 @@ Server -> iOS:
 
 from __future__ import annotations
 
+if __package__ in {None, ""}:
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import json
 import os
 import time
@@ -68,7 +74,7 @@ POST_FRAMES = 5
 MIN_GAP = 18  # min frames between bottom events
 
 # Stand gate thresholds
-STAND_KNEE_ANGLE_DEG_TH = 155.0
+STAND_KNEE_ANGLE_DEG_TH = 160.0
 STAND_KNEE_DELTA_MAX_DEG = 5.0
 
 READY_STREAK_N = 3

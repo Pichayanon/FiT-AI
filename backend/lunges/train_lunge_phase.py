@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+if __package__ in {None, ""}:
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import argparse
 import glob
 import os
@@ -8,6 +14,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+
+from shared.tcn_models import PhaseTCN
 
 
 # -----------------------------
@@ -20,92 +28,45 @@ class PhaseDataset(Dataset):
         self.samples = []
         self.in_dim = None
 
-        files = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
-        assert files, f"No .npz files found in {data_dir}"
+        npz_paths = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
+        assert npz_paths, f"No .npz files found in {data_dir}"
 
-        for f in files:
-            d = np.load(f)
-            X = d["features"]  # (T, F)
-            y = d["labels"]  # (T,) → values {0,1}
-            m = d["mask"]  # (T,)
+        for npz_path in npz_paths:
+            dataset = np.load(npz_path)
+            feature_matrix = dataset["features"]  # (T, F)
+            label_array = dataset["labels"]  # (T,) → values {0,1}
+            mask_array = dataset["mask"]  # (T,)
 
             if self.in_dim is None:
-                self.in_dim = int(X.shape[1])
-            elif int(X.shape[1]) != int(self.in_dim):
+                self.in_dim = int(feature_matrix.shape[1])
+            elif int(feature_matrix.shape[1]) != int(self.in_dim):
                 raise ValueError(
-                    f"Inconsistent feature dimension in {f}: "
-                    f"got {X.shape[1]}, expected {self.in_dim}"
+                    f"Inconsistent feature dimension in {npz_path}: "
+                    f"got {feature_matrix.shape[1]}, expected {self.in_dim}"
                 )
 
-            T = len(X)
-            for i in range(0, T - window + 1, stride):
-                xs = X[i : i + window]
-                ys = y[i : i + window]
-                ms = m[i : i + window]
+            sequence_length = len(feature_matrix)
+            for start_index in range(0, sequence_length - window + 1, stride):
+                window_features = feature_matrix[start_index : start_index + window]
+                window_labels = label_array[start_index : start_index + window]
+                window_mask = mask_array[start_index : start_index + window]
 
-                if ms.sum() == 0:
+                if window_mask.sum() == 0:
                     continue
 
-                self.samples.append((xs, ys))
+                self.samples.append((window_features, window_labels))
 
-        print(f"Loaded {len(self.samples)} samples from {len(files)} files")
+        print(f"Loaded {len(self.samples)} samples from {len(npz_paths)} files")
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        x, y = self.samples[idx]
+        window_features, window_labels = self.samples[idx]
         return (
-            torch.from_numpy(x).float(),  # (W, F)
-            torch.from_numpy(y).long(),  # (W,)
+            torch.from_numpy(window_features).float(),  # (W, F)
+            torch.from_numpy(window_labels).long(),  # (W,)
         )
-
-
-# -----------------------------
-# TCN Model
-# -----------------------------
-
-
-class TemporalBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, k: int = 3, d: int = 1):
-        super().__init__()
-        pad = (k - 1) * d
-
-        self.conv1 = nn.Conv1d(in_ch, out_ch, k, padding=pad, dilation=d)
-        self.conv2 = nn.Conv1d(out_ch, out_ch, k, padding=pad, dilation=d)
-        self.relu = nn.ReLU()
-
-        self.down = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else None
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = self.relu(self.conv1(x))
-        y = self.relu(self.conv2(y))
-
-        if self.down:
-            x = self.down(x)
-
-        # Ensure same temporal length
-        return y[..., : x.size(-1)] + x
-
-
-class SimpleTCN(nn.Module):
-    def __init__(self, in_dim: int = 9, num_classes: int = 2):
-        super().__init__()
-
-        self.tcn = nn.Sequential(
-            TemporalBlock(in_dim, 64, d=1),
-            TemporalBlock(64, 64, d=2),
-            TemporalBlock(64, 64, d=4),
-        )
-
-        self.fc = nn.Conv1d(64, num_classes, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, W, F)
-        x = x.transpose(1, 2)  # (B, F, W)
-        x = self.tcn(x)
-        x = self.fc(x)
-        return x.transpose(1, 2)  # (B, W, C)
 
 
 # -----------------------------
@@ -116,47 +77,47 @@ class SimpleTCN(nn.Module):
 def train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    ds = PhaseDataset(args.data, args.window, args.stride)
-    dl = DataLoader(ds, batch_size=args.bs, shuffle=True)
+    phase_dataset = PhaseDataset(args.data, args.window, args.stride)
+    data_loader = DataLoader(phase_dataset, batch_size=args.bs, shuffle=True)
 
-    if ds.in_dim is None:
+    if phase_dataset.in_dim is None:
         raise RuntimeError("Dataset appears empty; cannot infer feature dimension.")
 
-    model = SimpleTCN(in_dim=ds.in_dim, num_classes=2).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    crit = nn.CrossEntropyLoss()
+    model = PhaseTCN(in_dim=phase_dataset.in_dim, num_classes=2).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    criterion = nn.CrossEntropyLoss()
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
 
-        for x, y in dl:
-            x = x.to(device)
-            y = y.to(device)
+        for feature_window, label_window in data_loader:
+            feature_window = feature_window.to(device)
+            label_window = label_window.to(device)
 
-            logits = model(x)  # (B, W, 2)
+            logits = model(feature_window)  # (B, W, 2)
 
-            loss = crit(
+            loss = criterion(
                 logits.reshape(-1, 2),
-                y.reshape(-1),
+                label_window.reshape(-1),
             )
 
-            opt.zero_grad()
+            optimizer.zero_grad()
             loss.backward()
-            opt.step()
+            optimizer.step()
 
             total_loss += loss.item()
 
         print(
             f"Epoch {epoch:03d} | "
-            f"loss={total_loss / max(len(dl), 1):.4f}"
+            f"loss={total_loss / max(len(data_loader), 1):.4f}"
         )
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     torch.save(
         {
             "state_dict": model.state_dict(),
-            "in_dim": int(ds.in_dim),
+            "in_dim": int(phase_dataset.in_dim),
             "num_classes": 2,
             "window": args.window,
         },
@@ -188,4 +149,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

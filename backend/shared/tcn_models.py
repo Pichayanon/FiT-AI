@@ -6,7 +6,7 @@ for bottom/stand classification, plus PhaseTemporalBlock and PhaseTCN
 used for eccentric/concentric phase detection.
 
 These architectures match the training scripts exactly and are used
-only at inference time with pre-trained checkpoint weights.
+by both training and inference code paths.
 """
 
 from __future__ import annotations
@@ -69,6 +69,10 @@ class SimpleTCN(nn.Module):
     """Simple TCN classifier for temporal sequence classification.
 
     Takes input of shape (B, T, D) and produces class logits (B, num_classes).
+    Uses a temporal attention mechanism to let the model learn which frames
+    are most informative for classification, instead of averaging all frames
+    equally with AdaptiveAvgPool1d.
+
     Matches the architecture used in squat and lunge bottom/stand models.
     """
 
@@ -91,14 +95,17 @@ class SimpleTCN(nn.Module):
             ch_in = ch_out
             dilation *= 2
         self.tcn = nn.Sequential(*layers)
-        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.attention = nn.Linear(channels[-1], 1)
         self.fc = nn.Linear(channels[-1], num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.transpose(1, 2)  # (B, T, D) -> (B, D, T)
-        y = self.tcn(x)
-        y = self.pool(y).squeeze(-1)
-        return self.fc(y)
+        x = x.transpose(1, 2)          # (B, T, D) -> (B, D, T)
+        y = self.tcn(x)                 # (B, C, T)
+        y = y.transpose(1, 2)          # (B, T, C)
+        scores = self.attention(y).squeeze(-1)          # (B, T)
+        weights = torch.softmax(scores, dim=-1)         # (B, T)
+        context = (y * weights.unsqueeze(-1)).sum(dim=1)  # (B, C)
+        return self.fc(context)
 
 
 class PhaseTemporalBlock(nn.Module):

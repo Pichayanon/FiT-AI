@@ -16,7 +16,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
 import cv2
 import mediapipe as mp
 from fastapi import WebSocket
@@ -27,7 +26,8 @@ from shared.json_utils import parse_json
 from shared.math_utils import angle_3pts
 from shared.side_view_gate_dynamic import SideViewGateDynamic
 from shared.status_sender import StatusSender
-from shared.tcn_service import load_tcn, tcn_predict
+from shared.tcn_models import PhaseTCN
+from shared.tcn_service import load_phase_tcn, load_tcn, tcn_predict
 
 from lunges.features import (
     BOTTOM_FEATURE_DIM,
@@ -39,50 +39,6 @@ from lunges.features import (
 
 
 _PHASE_LABELS: Dict[int, str] = {0: "eccentric", 1: "concentric"}
-
-
-# ---------------------------------------------------------------
-# LungePhaseTCN (kept separate for checkpoint compatibility)
-# ---------------------------------------------------------------
-
-class LungePhaseTCN(nn.Module):
-    """Lunge-specific phase TCN architecture (matches train_lunge_phase.py).
-
-    Uses an inner _Block class with a different forward pass than the
-    shared PhaseTCN. Kept separate to guarantee checkpoint compatibility.
-    """
-
-    def __init__(self, in_dim: int = 9, num_classes: int = 2) -> None:
-        super().__init__()
-
-        class _Block(nn.Module):
-            def __init__(self, in_ch: int, out_ch: int, k: int = 3, d: int = 1):
-                super().__init__()
-                pad = (k - 1) * d
-                self.conv1 = nn.Conv1d(in_ch, out_ch, k, padding=pad, dilation=d)
-                self.conv2 = nn.Conv1d(out_ch, out_ch, k, padding=pad, dilation=d)
-                self.relu = nn.ReLU()
-                self.down = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else None
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                y = self.relu(self.conv1(x))
-                y = self.relu(self.conv2(y))
-                if self.down:
-                    x = self.down(x)
-                return y[..., : x.size(-1)] + x
-
-        self.tcn = nn.Sequential(
-            _Block(in_dim, 64, d=1),
-            _Block(64, 64, d=2),
-            _Block(64, 64, d=4),
-        )
-        self.fc = nn.Conv1d(64, num_classes, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.transpose(1, 2)  # (B, W, F) -> (B, F, W)
-        x = self.tcn(x)
-        x = self.fc(x)
-        return x.transpose(1, 2)  # (B, W, C)
 
 
 # ---------------------------------------------------------------
@@ -98,32 +54,16 @@ class LungeModelService:
         # Load bottom model via shared service
         self.bottom_model, self.bottom_T, self.inv_labels_bottom, self.bottom_in_dim = load_tcn(bottom_path)
 
-        # Load phase model (lunge-specific architecture)
-        self.phase_model: Optional[LungePhaseTCN] = None
+        # Load phase model via shared service
+        self.phase_model: Optional[PhaseTCN] = None
         self.phase_window: Optional[int] = None
         self.phase_in_dim: Optional[int] = None
         if phase_path and os.path.isfile(phase_path):
             self._load_phase(phase_path)
 
     def _load_phase(self, path: str) -> None:
-        """Load phase TCN with lunge-specific architecture."""
-        try:
-            ckpt = torch.load(path, map_location="cpu")
-            in_dim = int(ckpt.get("in_dim", 9))
-            num_classes = int(ckpt.get("num_classes", 2))
-            self.phase_window = int(ckpt.get("window", 30))
-            self.phase_in_dim = in_dim
-            self.phase_model = LungePhaseTCN(
-                in_dim=in_dim, num_classes=num_classes
-            )
-            self.phase_model.load_state_dict(ckpt["state_dict"])
-            self.phase_model.eval()
-            print(
-                f"[MODEL] Lunge phase TCN loaded: {path} "
-                f"in_dim={in_dim} window={self.phase_window} num_classes={num_classes}"
-            )
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"[MODEL] Cannot load lunge phase TCN: {path} err={e}")
+        """Load phase TCN from shared model service."""
+        self.phase_model, self.phase_window, self.phase_in_dim = load_phase_tcn(path)
 
     @property
     def bottom_loaded(self) -> bool:
@@ -133,43 +73,47 @@ class LungeModelService:
     def phase_loaded(self) -> bool:
         return self.phase_model is not None and self.phase_window is not None
 
-    def predict_bottom(self, x_win: np.ndarray) -> Tuple[str, float, np.ndarray]:
+    def predict_bottom(self, feature_window: np.ndarray) -> Tuple[str, float, np.ndarray]:
         """Run bottom TCN prediction. Returns (label, confidence, probs)."""
         if self.bottom_model is None or self.bottom_T is None:
             return "unknown", 0.0, np.array([])
         return tcn_predict(
             self.bottom_model, self.inv_labels_bottom, int(self.bottom_T),
-            x_win.astype(np.float32),
+            feature_window.astype(np.float32),
         )
 
-    def predict_phase(self, x_win: np.ndarray) -> str:
+    def predict_phase(self, feature_window: np.ndarray) -> str:
         """Run phase TCN prediction. Returns 'eccentric', 'concentric', or 'unknown'."""
-        if self.phase_model is None or self.phase_window is None or x_win.shape[0] < self.phase_window:
+        if (
+            self.phase_model is None
+            or self.phase_window is None
+            or feature_window.shape[0] < self.phase_window
+        ):
             return "unknown"
-        w = int(self.phase_window)
-        x = x_win[-w:].astype(np.float32)
-        xt = torch.from_numpy(x).unsqueeze(0)  # (1, W, 9)
+        phase_window_size = int(self.phase_window)
+        phase_feature_window = feature_window[-phase_window_size:].astype(np.float32)
+        phase_feature_tensor = torch.from_numpy(phase_feature_window).unsqueeze(0)
         with torch.no_grad():
-            logits = self.phase_model(xt)  # (1, W, 2)
+            logits = self.phase_model(phase_feature_tensor)  # (1, W, 2)
             last_logits = logits[0, -1, :]
-            pred_id = int(torch.argmax(last_logits).item())
-        return _PHASE_LABELS.get(pred_id, "unknown")
+            predicted_phase_index = int(torch.argmax(last_logits).item())
+        return _PHASE_LABELS.get(predicted_phase_index, "unknown")
 
 
 # ---------------------------------------------------------------
 # Rep counter
 # ---------------------------------------------------------------
 
-def update_rep_counter(st: StreamState, event_i: int, pred_label: str) -> None:
+def update_rep_counter(stream_state: StreamState, event_i: int, pred_label: str) -> None:
     """Count a rep once per event. Good rep: label starts with 'good' or == 'correct'."""
-    if event_i == st.last_counted_event_i:
+    if event_i == stream_state.last_counted_event_i:
         return
-    st.last_counted_event_i = event_i
-    st.total_reps += 1
+    stream_state.last_counted_event_i = event_i
+    stream_state.total_reps += 1
     if pred_label.startswith("good") or pred_label == "correct":
-        st.good_reps += 1
+        stream_state.good_reps += 1
     else:
-        st.bad_reps += 1
+        stream_state.bad_reps += 1
 
 
 # ---------------------------------------------------------------
@@ -348,9 +292,9 @@ class LungeWebSocketSession(BaseWebSocketSession):
         start = event_i - self.pre_frames
         end = event_i + self.post_frames
         need = self.pre_frames + self.post_frames + 1
-        win = [r for r in self.st.hist if start <= r[0] <= end]
+        history_window = [record for record in self.st.hist if start <= record[0] <= end]
 
-        if len(win) < need:
+        if len(history_window) < need:
             # Not enough frames yet — set as pending
             self.st.pending = {"event": event_i, "start": start, "end": end}
             return
@@ -362,14 +306,17 @@ class LungeWebSocketSession(BaseWebSocketSession):
                 "mode": "bottom",
                 "phase": phase,
                 "event_i": int(event_i),
-                "window_frames": int(len(win)),
+                "window_frames": int(len(history_window)),
                 "T": int(self.model_svc.bottom_T),
                 "D": self.bottom_feature_dim,
             },
         )
 
-        x_win = np.stack([r[1] for r in win], axis=0).astype(np.float32)
-        pred_label, conf, _ = self.model_svc.predict_bottom(x_win)
+        feature_window = np.stack(
+            [record[1] for record in history_window],
+            axis=0,
+        ).astype(np.float32)
+        pred_label, conf, _ = self.model_svc.predict_bottom(feature_window)
         is_good = pred_label.startswith("good") or pred_label == "correct"
         update_rep_counter(self.st, int(event_i), pred_label)
 
@@ -411,10 +358,10 @@ class LungeWebSocketSession(BaseWebSocketSession):
 
         # Step 2: Run pose detection
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = self.pose.process(img_rgb)
+        pose_result = self.pose.process(img_rgb)
 
         # Step 3: Handle no pose
-        if not res.pose_landmarks:
+        if not pose_result.pose_landmarks:
             self._reset_buffers()
             self.smoother.reset()
             await self.status.send_status(
@@ -425,16 +372,21 @@ class LungeWebSocketSession(BaseWebSocketSession):
             return
 
         # Step 4: Side-view gate check
-        lm = res.pose_landmarks.landmark
+        landmarks = pose_result.pose_landmarks.landmark
 
         # Build numpy array and apply smoothing
-        lm_arr = np.zeros((33, 4), dtype=np.float32)
+        landmark_array = np.zeros((33, 4), dtype=np.float32)
         for idx in range(33):
-            lm_arr[idx] = [lm[idx].x, lm[idx].y, lm[idx].z, lm[idx].visibility]
+            landmark_array[idx] = [
+                landmarks[idx].x,
+                landmarks[idx].y,
+                landmarks[idx].z,
+                landmarks[idx].visibility,
+            ]
 
-        lm_arr = self.smoother.update(lm_arr)
+        landmark_array = self.smoother.update(landmark_array)
 
-        ok_side, gate_dbg = self.gate.check(lm_arr)
+        ok_side, gate_dbg = self.gate.check(landmark_array)
         self.st.last_gate_debug = gate_dbg
 
         if not ok_side:
@@ -485,16 +437,17 @@ class LungeWebSocketSession(BaseWebSocketSession):
             return
 
         # Step 6: Extract features
-        feats = extract_bottom_features(lm_arr[np.newaxis, ...])[0]
+        bottom_feature_vector = extract_bottom_features(landmark_array)
 
         # Compute average knee angle from features (indices 30, 31 are knee angles / 180)
-        knee_avg = float((feats[30] + feats[31]) * 0.5 * 180.0)
+        knee_avg = float((bottom_feature_vector[30] + bottom_feature_vector[31]) * 0.5 * 180.0)
 
         # Step 7: Phase detection
-        phase_feats, self.st.prev_phase_vals = extract_phase_features_from_lm(
-            lm_arr, self.st.prev_phase_vals
+        phase_feature_vector, self.st.prev_phase_vals = extract_phase_features_from_lm(
+            landmark_array,
+            self.st.prev_phase_vals,
         )
-        self.st.phase_feat_buffer.append(phase_feats)
+        self.st.phase_feat_buffer.append(phase_feature_vector)
         if self.model_svc.phase_loaded and len(self.st.phase_feat_buffer) >= self.model_svc.phase_window:
             phase = self.model_svc.predict_phase(np.array(self.st.phase_feat_buffer))
         else:
@@ -517,7 +470,7 @@ class LungeWebSocketSession(BaseWebSocketSession):
         self.st.prev_phase = phase
 
         # Add to history
-        self.st.hist.append((self.frame_i, feats))
+        self.st.hist.append((self.frame_i, bottom_feature_vector))
 
         # Step 9: Bottom prediction (immediate)
         if event_i is not None and self.model_svc.bottom_loaded and self.model_svc.bottom_T is not None:
@@ -529,8 +482,10 @@ class LungeWebSocketSession(BaseWebSocketSession):
             start = self.st.pending["start"]
             end = self.st.pending["end"]
             need = self.pre_frames + self.post_frames + 1
-            win = [r for r in self.st.hist if start <= r[0] <= end]
-            if len(win) >= need:
+            history_window = [
+                record for record in self.st.hist if start <= record[0] <= end
+            ]
+            if len(history_window) >= need:
                 self.st.pending = None
                 await self._predict_and_send_bottom(pending_event, phase)
 

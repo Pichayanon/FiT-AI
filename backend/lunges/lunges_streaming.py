@@ -24,6 +24,12 @@ Server -> iOS:
 
 from __future__ import annotations
 
+if __package__ in {None, ""}:
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import json
 import os
 import time
@@ -42,11 +48,8 @@ from shared.side_view_gate_dynamic import SideViewGateDynamic
 from shared.status_sender import StatusSender
 from lunges.features import BOTTOM_FEATURE_DIM
 from lunges.session import (
-    LungePhaseTCN,
     LungeModelService,
     LungeWebSocketSession,
-    StreamState,
-    update_rep_counter,
 )
 
 

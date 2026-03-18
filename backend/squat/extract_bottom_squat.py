@@ -329,7 +329,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--max_bottom_deg",
         type=float,
-        default=140.0,
+        default=160.0,
         help="only minima with knee_ema <= this are kept",
     )
     ap.add_argument("--min_gap", type=int, default=18)

@@ -71,52 +71,56 @@ class SquatModelService:
     def phase_loaded(self) -> bool:
         return self.phase_model is not None and self.phase_window is not None
 
-    def predict_bottom(self, x_win: np.ndarray) -> Tuple[str, float, np.ndarray]:
+    def predict_bottom(self, feature_window: np.ndarray) -> Tuple[str, float, np.ndarray]:
         """Run bottom TCN prediction. Returns (label, confidence, probs)."""
         if self.bottom_model is None or self.bottom_T is None:
             return "unknown", 0.0, np.array([])
         return tcn_predict(
             self.bottom_model, self.inv_labels_bottom, int(self.bottom_T),
-            x_win.astype(np.float32),
+            feature_window.astype(np.float32),
         )
 
-    def predict_stand(self, x_win: np.ndarray) -> Tuple[str, float, np.ndarray]:
+    def predict_stand(self, feature_window: np.ndarray) -> Tuple[str, float, np.ndarray]:
         """Run stand TCN prediction. Returns (label, confidence, probs)."""
         if self.stand_model is None or self.stand_T is None:
             return "unknown", 0.0, np.array([])
         return tcn_predict(
             self.stand_model, self.inv_labels_stand, int(self.stand_T),
-            x_win.astype(np.float32),
+            feature_window.astype(np.float32),
         )
 
-    def predict_phase(self, x_win: np.ndarray) -> str:
+    def predict_phase(self, feature_window: np.ndarray) -> str:
         """Run phase TCN prediction. Returns 'eccentric', 'concentric', or 'unknown'."""
-        if self.phase_model is None or self.phase_window is None or x_win.shape[0] < self.phase_window:
+        if (
+            self.phase_model is None
+            or self.phase_window is None
+            or feature_window.shape[0] < self.phase_window
+        ):
             return "unknown"
-        w = int(self.phase_window)
-        x = x_win[-w:].astype(np.float32)
-        xt = torch.from_numpy(x).unsqueeze(0)  # (1, W, 10)
+        phase_window_size = int(self.phase_window)
+        phase_feature_window = feature_window[-phase_window_size:].astype(np.float32)
+        phase_feature_tensor = torch.from_numpy(phase_feature_window).unsqueeze(0)
         with torch.no_grad():
-            logits = self.phase_model(xt)  # (1, W, 2)
+            logits = self.phase_model(phase_feature_tensor)  # (1, W, 2)
             last_logits = logits[0, -1, :]
-            pred_id = int(torch.argmax(last_logits).item())
-        return _PHASE_LABELS.get(pred_id, "unknown")
+            predicted_phase_index = int(torch.argmax(last_logits).item())
+        return _PHASE_LABELS.get(predicted_phase_index, "unknown")
 
 
 # ---------------------------------------------------------------
 # Rep counter
 # ---------------------------------------------------------------
 
-def update_rep_counter(st: StreamState, event_i: int, pred_label: str) -> None:
+def update_rep_counter(stream_state: StreamState, event_i: int, pred_label: str) -> None:
     """Count a rep once per event. Good rep: label starts with 'good'."""
-    if event_i == st.last_counted_event_i:
+    if event_i == stream_state.last_counted_event_i:
         return
-    st.last_counted_event_i = event_i
-    st.total_reps += 1
+    stream_state.last_counted_event_i = event_i
+    stream_state.total_reps += 1
     if pred_label.startswith("good"):
-        st.good_reps += 1
+        stream_state.good_reps += 1
     else:
-        st.bad_reps += 1
+        stream_state.bad_reps += 1
 
 
 # ---------------------------------------------------------------
@@ -326,9 +330,9 @@ class SquatWebSocketSession(BaseWebSocketSession):
         start = event_i - self.pre_frames
         end = event_i + self.post_frames
         need = self.pre_frames + self.post_frames + 1
-        win = [r for r in self.st.hist if start <= r[0] <= end]
+        history_window = [record for record in self.st.hist if start <= record[0] <= end]
 
-        if len(win) < need:
+        if len(history_window) < need:
             # Not enough frames yet — set as pending
             self.st.pending = {"event": event_i, "start": start, "end": end}
             return
@@ -340,14 +344,17 @@ class SquatWebSocketSession(BaseWebSocketSession):
                 "mode": "bottom",
                 "phase": phase,
                 "event_i": int(event_i),
-                "window_frames": int(len(win)),
+                "window_frames": int(len(history_window)),
                 "T": int(self.model_svc.bottom_T),
                 "D": self.bottom_feature_dim,
             },
         )
 
-        x_win = np.stack([r[2] for r in win], axis=0).astype(np.float32)
-        pred_label, conf, _ = self.model_svc.predict_bottom(x_win)
+        feature_window = np.stack(
+            [record[2] for record in history_window],
+            axis=0,
+        ).astype(np.float32)
+        pred_label, conf, _ = self.model_svc.predict_bottom(feature_window)
         is_good = pred_label.startswith("good")
         update_rep_counter(self.st, int(event_i), pred_label)
 
@@ -390,10 +397,10 @@ class SquatWebSocketSession(BaseWebSocketSession):
         # Step 2: Run pose detection
         import cv2
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = self.pose.process(img_rgb)
+        pose_result = self.pose.process(img_rgb)
 
         # Step 3: Handle no pose
-        if not res.pose_landmarks:
+        if not pose_result.pose_landmarks:
             self._reset_buffers()
             await self.status.send_status(
                 self.ws, self.st, "waiting",
@@ -403,8 +410,8 @@ class SquatWebSocketSession(BaseWebSocketSession):
             return
 
         # Step 4: Front-view gate check
-        lm = res.pose_landmarks.landmark
-        ok_front, gate_dbg = self.gate.check(lm)
+        landmarks = pose_result.pose_landmarks.landmark
+        ok_front, gate_dbg = self.gate.check(landmarks)
         self.st.last_gate_debug = gate_dbg
 
         if not ok_front:
@@ -455,15 +462,15 @@ class SquatWebSocketSession(BaseWebSocketSession):
             return
 
         # Step 6: Extract features and compute knee angle
-        lhip = (lm[L_HIP].x, lm[L_HIP].y)
-        rhip = (lm[R_HIP].x, lm[R_HIP].y)
-        lknee = (lm[L_KNE].x, lm[L_KNE].y)
-        rknee = (lm[R_KNE].x, lm[R_KNE].y)
-        lank = (lm[L_ANK].x, lm[L_ANK].y)
-        rank = (lm[R_ANK].x, lm[R_ANK].y)
-        knee_l = angle_3pts(lhip, lknee, lank)
-        knee_r = angle_3pts(rhip, rknee, rank)
-        knee_raw = float((knee_l + knee_r) * 0.5)
+        left_hip_xy = (landmarks[L_HIP].x, landmarks[L_HIP].y)
+        right_hip_xy = (landmarks[R_HIP].x, landmarks[R_HIP].y)
+        left_knee_xy = (landmarks[L_KNE].x, landmarks[L_KNE].y)
+        right_knee_xy = (landmarks[R_KNE].x, landmarks[R_KNE].y)
+        left_ankle_xy = (landmarks[L_ANK].x, landmarks[L_ANK].y)
+        right_ankle_xy = (landmarks[R_ANK].x, landmarks[R_ANK].y)
+        left_knee_angle = angle_3pts(left_hip_xy, left_knee_xy, left_ankle_xy)
+        right_knee_angle = angle_3pts(right_hip_xy, right_knee_xy, right_ankle_xy)
+        knee_raw = float((left_knee_angle + right_knee_angle) * 0.5)
 
         # Stand gate
         knee_delta = abs(knee_raw - self.st.prev_knee_raw) if self.st.prev_knee_raw is not None else 0.0
@@ -479,11 +486,11 @@ class SquatWebSocketSession(BaseWebSocketSession):
             f"knee={knee_raw:.1f} d={knee_delta:.1f}"
         )
 
-        stand_feat = extract_stand_features(lm)
-        bottom_feat = extract_bottom_features(lm)
+        stand_feature_vector = extract_stand_features(landmarks)
+        bottom_feature_vector = extract_bottom_features(landmarks)
 
         # Step 7: Phase detection
-        self.st.phase_feat_buffer.append(extract_phase_features(lm))
+        self.st.phase_feat_buffer.append(extract_phase_features(landmarks))
         if self.model_svc.phase_loaded and len(self.st.phase_feat_buffer) >= self.model_svc.phase_window:
             phase = self.model_svc.predict_phase(np.array(self.st.phase_feat_buffer))
         else:
@@ -499,7 +506,16 @@ class SquatWebSocketSession(BaseWebSocketSession):
         self.st.prev_phase = phase
 
         # Add to history
-        self.st.hist.append((self.frame_i, stand_feat, bottom_feat, frame.copy(), knee_raw, None))
+        self.st.hist.append(
+            (
+                self.frame_i,
+                stand_feature_vector,
+                bottom_feature_vector,
+                frame.copy(),
+                knee_raw,
+                None,
+            )
+        )
 
         # Step 9: Bottom prediction (immediate)
         if event_i is not None and self.model_svc.bottom_loaded and self.model_svc.bottom_T is not None:
@@ -511,8 +527,10 @@ class SquatWebSocketSession(BaseWebSocketSession):
             start = self.st.pending["start"]
             end = self.st.pending["end"]
             need = self.pre_frames + self.post_frames + 1
-            win = [r for r in self.st.hist if start <= r[0] <= end]
-            if len(win) >= need:
+            history_window = [
+                record for record in self.st.hist if start <= record[0] <= end
+            ]
+            if len(history_window) >= need:
                 self.st.pending = None
                 await self._predict_and_send_bottom(pending_event, phase)
 
@@ -527,9 +545,12 @@ class SquatWebSocketSession(BaseWebSocketSession):
             and (len(self.st.hist) >= stand_win_frames)
             and (self.frame_i - self.st.last_stand_pred_i >= self.stand_pred_cooldown)
         ):
-            recent = list(self.st.hist)[-stand_win_frames:]
-            x_win = np.stack([r[1] for r in recent], axis=0).astype(np.float32)
-            pred_label, conf, _ = self.model_svc.predict_stand(x_win)
+            recent_history_records = list(self.st.hist)[-stand_win_frames:]
+            stand_feature_window = np.stack(
+                [record[1] for record in recent_history_records],
+                axis=0,
+            ).astype(np.float32)
+            pred_label, conf, _ = self.model_svc.predict_stand(stand_feature_window)
             self.st.last_stand_pred_i = self.frame_i
             is_ok = pred_label in self.stand_ok_labels
             self.st.stand_ok = bool(is_ok)

@@ -4,7 +4,7 @@ train_squat_stand.py
 Train a TCN to classify standing stance:
   good_stand | stand_too_narrow | stand_too_wide
 
-Focused Feature Set (13 dims per frame):
+Focused Feature Set (16 dims per frame):
   - 4 width ratios   : ankle/hip, ankle/sho, knee/hip, knee/sho
   - 6 X-positions     : L/R ankle, knee, hip (normalized by hip_width)
   - 3 angles          : knee_L, knee_R, torso_tilt (all / 180)
@@ -16,6 +16,12 @@ Usage:
 """
 
 from __future__ import annotations
+
+if __package__ in {None, ""}:
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import argparse
 import glob
@@ -29,7 +35,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-import matplotlib.pyplot as plt
+
+from shared.tcn_models import SimpleTCN
+from squat.features import STAND_FEATURE_DIM, extract_stand_features
 
 
 def _confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int) -> np.ndarray:
@@ -109,18 +117,6 @@ def _print_eval_report(cm: np.ndarray, idx_to_label: Dict[int, str]) -> None:
 
 
 # -----------------------------
-# Constants
-# -----------------------------
-FEATURE_DIM = 16
-
-# MediaPipe Pose indices (only the ones we need)
-L_SHO, R_SHO = 11, 12
-L_HIP, R_HIP = 23, 24
-L_KNE, R_KNE = 25, 26
-L_ANK, R_ANK = 27, 28
-
-
-# -----------------------------
 # Utilities
 # -----------------------------
 
@@ -131,24 +127,28 @@ def set_seed(seed: int = 42) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def resample_time(x: np.ndarray, target_T: int) -> np.ndarray:
-    T, D = x.shape
-    if T == target_T:
-        return x.astype(np.float32)
-    if T < 2:
-        return np.repeat(x, target_T, axis=0)[:target_T].astype(np.float32)
-    src = np.linspace(0, 1, T)
+def resample_time(feature_sequence: np.ndarray, target_T: int) -> np.ndarray:
+    time_steps, feature_dim = feature_sequence.shape
+    if time_steps == target_T:
+        return feature_sequence.astype(np.float32)
+    if time_steps < 2:
+        return np.repeat(feature_sequence, target_T, axis=0)[:target_T].astype(np.float32)
+    src = np.linspace(0, 1, time_steps)
     dst = np.linspace(0, 1, target_T)
-    out = np.zeros((target_T, D), dtype=np.float32)
-    for j in range(D):
-        out[:, j] = np.interp(dst, src, x[:, j])
-    return out
+    resampled_sequence = np.zeros((target_T, feature_dim), dtype=np.float32)
+    for feature_index in range(feature_dim):
+        resampled_sequence[:, feature_index] = np.interp(
+            dst,
+            src,
+            feature_sequence[:, feature_index],
+        )
+    return resampled_sequence
 
 
-def normalize_per_sample(x: np.ndarray) -> np.ndarray:
-    mu = x.mean(axis=0, keepdims=True)
-    sd = x.std(axis=0, keepdims=True) + 1e-6
-    return ((x - mu) / sd).astype(np.float32)
+def normalize_per_sample(feature_sequence: np.ndarray) -> np.ndarray:
+    mean_values = feature_sequence.mean(axis=0, keepdims=True)
+    std_values = feature_sequence.std(axis=0, keepdims=True) + 1e-6
+    return ((feature_sequence - mean_values) / std_values).astype(np.float32)
 
 
 def load_npz(path: str) -> Tuple[np.ndarray, np.ndarray, str]:
@@ -157,101 +157,6 @@ def load_npz(path: str) -> Tuple[np.ndarray, np.ndarray, str]:
     mask = z["mask"].astype(np.float32)            # (T,)
     label = str(z["label"])
     return keypoints, mask, label
-
-
-def _dist(a: np.ndarray, b: np.ndarray) -> float:
-    return float(np.sqrt(np.sum((a - b) ** 2)))
-
-
-def _safe_norm(v: np.ndarray, eps: float = 1e-6) -> float:
-    return float(np.sqrt(np.sum(v * v)) + eps)
-
-
-def _angle_3pts(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
-    ba = a - b
-    bc = c - b
-    denom = (_safe_norm(ba) * _safe_norm(bc)) + 1e-6
-    cosang = float(np.clip(np.dot(ba, bc) / denom, -1.0, 1.0))
-    return float(np.degrees(np.arccos(cosang)))
-
-
-# -----------------------------
-# Feature Extraction (16 dims)
-# -----------------------------
-
-def extract_stand_features(kp: np.ndarray) -> np.ndarray:
-    """Extract stance-focused features.
-
-    Per frame (16 dims):
-      [0]  ankle_w / hip_w
-      [1]  ankle_w / sho_w
-      [2]  knee_w  / hip_w
-      [3]  knee_w  / sho_w
-      [4]  L ankle X (norm)
-      [5]  R ankle X (norm)
-      [6]  L knee  X (norm)
-      [7]  R knee  X (norm)
-      [8]  L hip   X (norm)
-      [9]  R hip   X (norm)
-      [10] knee angle L  / 180
-      [11] knee angle R  / 180
-      [12] torso tilt    / 180
-      [13] feet distance (ankle_w / scale)
-      [14] shoulder distance (sho_w / scale)
-      [15] feet/shoulder ratio (ankle_w / sho_w)
-
-    :param kp: (T, 33, 4)
-    :returns: (T, 16)
-    """
-    T = kp.shape[0]
-    xyz = kp[..., :3].astype(np.float32)
-    out = np.zeros((T, FEATURE_DIM), dtype=np.float32)
-
-    for t in range(T):
-        p = xyz[t]
-        lhip, rhip = p[L_HIP], p[R_HIP]
-        lsho, rsho = p[L_SHO], p[R_SHO]
-        lkne, rkne = p[L_KNE], p[R_KNE]
-        lank, rank = p[L_ANK], p[R_ANK]
-
-        mid_hip = 0.5 * (lhip + rhip)
-        hip_w = _dist(lhip, rhip)
-        sho_w = _dist(lsho, rsho)
-        ankle_w = _dist(lank, rank)
-        knee_w = _dist(lkne, rkne)
-        scale = hip_w if hip_w > 1e-4 else (sho_w if sho_w > 1e-4 else 1.0)
-
-        # Width ratios (the core signal for narrow/wide)
-        out[t, 0] = ankle_w / (hip_w + 1e-6)
-        out[t, 1] = ankle_w / (sho_w + 1e-6)
-        out[t, 2] = knee_w / (hip_w + 1e-6)
-        out[t, 3] = knee_w / (sho_w + 1e-6)
-
-        # Normalized X positions (left-right spread)
-        out[t, 4] = (lank[0] - mid_hip[0]) / (scale + 1e-6)
-        out[t, 5] = (rank[0] - mid_hip[0]) / (scale + 1e-6)
-        out[t, 6] = (lkne[0] - mid_hip[0]) / (scale + 1e-6)
-        out[t, 7] = (rkne[0] - mid_hip[0]) / (scale + 1e-6)
-        out[t, 8] = (lhip[0] - mid_hip[0]) / (scale + 1e-6)
-        out[t, 9] = (rhip[0] - mid_hip[0]) / (scale + 1e-6)
-
-        # Angles (sanity: standing knees should be ~170-180)
-        out[t, 10] = _angle_3pts(lhip, lkne, lank) / 180.0
-        out[t, 11] = _angle_3pts(rhip, rkne, rank) / 180.0
-
-        # Torso tilt
-        mid_sho = 0.5 * (lsho + rsho)
-        v = (mid_sho - mid_hip).astype(np.float32)
-        up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-        denom = (_safe_norm(v) * _safe_norm(up)) + 1e-6
-        cosang = float(np.clip(np.dot(v, up) / denom, -1.0, 1.0))
-        out[t, 12] = float(np.degrees(np.arccos(cosang))) / 180.0
-
-        out[t, 13] = ankle_w / (scale + 1e-6)
-        out[t, 14] = sho_w / (scale + 1e-6)
-        out[t, 15] = ankle_w / (sho_w + 1e-6)
-
-    return out
 
 
 # -----------------------------
@@ -269,19 +174,19 @@ class StandingNPZDataset(Dataset):
         self.samples = samples
         self.label_map = label_map
         self.T = int(T)
-        self.in_dim = FEATURE_DIM
+        self.in_dim = STAND_FEATURE_DIM
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int):
-        s = self.samples[idx]
-        kp, mask, label = load_npz(s.path)
-        x = extract_stand_features(kp)
-        x = resample_time(x, self.T)
-        # REMOVED: x = normalize_per_sample(x)  (destroys spatial proportions)
-        y = self.label_map[label]
-        return torch.from_numpy(x), torch.tensor(y, dtype=torch.long)
+        sample = self.samples[idx]
+        keypoints, mask, label_name = load_npz(sample.path)
+        feature_sequence = extract_stand_features(keypoints)
+        feature_sequence = resample_time(feature_sequence, self.T)
+        # REMOVED: normalize_per_sample(feature_sequence) (destroys spatial proportions)
+        label_id = self.label_map[label_name]
+        return torch.from_numpy(feature_sequence), torch.tensor(label_id, dtype=torch.long)
 
 
 def build_splits(npz_paths: List[str], val_ratio: float = 0.2, seed: int = 42) -> Tuple[List[str], List[str]]:
@@ -301,74 +206,11 @@ def make_label_map(labels: List[str]) -> Dict[str, int]:
 
 
 def count_label_dist(npz_paths: List[str]) -> Dict[str, int]:
-    c: Dict[str, int] = {}
-    for p in npz_paths:
-        lab = load_npz(p)[2]
-        c[lab] = c.get(lab, 0) + 1
-    return c
-
-
-# -----------------------------
-# TCN
-# -----------------------------
-
-class TemporalBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, k: int = 3, dilation: int = 1, dropout: float = 0.1):
-        super().__init__()
-        pad = (k - 1) * dilation
-        self.conv1 = nn.Conv1d(in_ch, out_ch, kernel_size=k, dilation=dilation, padding=pad)
-        self.act1 = nn.ReLU()
-        self.drop1 = nn.Dropout(dropout)
-
-        self.conv2 = nn.Conv1d(out_ch, out_ch, kernel_size=k, dilation=dilation, padding=pad)
-        self.act2 = nn.ReLU()
-        self.drop2 = nn.Dropout(dropout)
-
-        self.down = nn.Conv1d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else None
-        self.pad = pad
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = self.conv1(x)
-        y = y[..., :-self.pad] if self.pad > 0 else y
-        y = self.drop1(self.act1(y))
-
-        y = self.conv2(y)
-        y = y[..., :-self.pad] if self.pad > 0 else y
-        y = self.drop2(self.act2(y))
-
-        res = x if self.down is None else self.down(x)
-        res = res[..., -y.shape[-1]:]
-        return y + res
-
-
-class SimpleTCN(nn.Module):
-    def __init__(
-        self,
-        in_dim: int,
-        num_classes: int = 2,
-        channels: Tuple[int, int, int] = (128, 128, 128),
-        k: int = 3,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        layers: List[nn.Module] = []
-        ch_in = in_dim
-        dilation = 1
-        for ch_out in channels:
-            layers.append(TemporalBlock(ch_in, ch_out, k=k, dilation=dilation, dropout=dropout))
-            ch_in = ch_out
-            dilation *= 2
-
-        self.tcn = nn.Sequential(*layers)
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(channels[-1], num_classes)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B,T,D) -> (B,D,T)
-        x = x.transpose(1, 2)
-        y = self.tcn(x)
-        y = self.pool(y).squeeze(-1)
-        return self.fc(y)
+    label_counts: Dict[str, int] = {}
+    for npz_path in npz_paths:
+        label_name = load_npz(npz_path)[2]
+        label_counts[label_name] = label_counts.get(label_name, 0) + 1
+    return label_counts
 
 
 # -----------------------------
@@ -388,18 +230,18 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Tupl
     total = 0
     correct = 0
     loss_sum = 0.0
-    ce = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss()
 
-    for x, y in loader:
-        x = x.to(device)
-        y = y.to(device)
-        logits = model(x)
-        loss = ce(logits, y)
-        loss_sum += float(loss.item()) * x.size(0)
+    for feature_batch, label_batch in loader:
+        feature_batch = feature_batch.to(device)
+        label_batch = label_batch.to(device)
+        logits = model(feature_batch)
+        loss = criterion(logits, label_batch)
+        loss_sum += float(loss.item()) * feature_batch.size(0)
 
-        pred = torch.argmax(logits, dim=1)
-        correct += int((pred == y).sum().item())
-        total += x.size(0)
+        predicted_labels = torch.argmax(logits, dim=1)
+        correct += int((predicted_labels == label_batch).sum().item())
+        total += feature_batch.size(0)
 
     acc = correct / max(1, total)
     loss_avg = loss_sum / max(1, total)
@@ -415,24 +257,24 @@ def evaluate_with_preds(
     total = 0
     correct = 0
     loss_sum = 0.0
-    ce = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss()
 
     y_true: List[int] = []
     y_pred: List[int] = []
 
-    for x, y in loader:
-        x = x.to(device)
-        y = y.to(device)
-        logits = model(x)
-        loss = ce(logits, y)
-        loss_sum += float(loss.item()) * x.size(0)
+    for feature_batch, label_batch in loader:
+        feature_batch = feature_batch.to(device)
+        label_batch = label_batch.to(device)
+        logits = model(feature_batch)
+        loss = criterion(logits, label_batch)
+        loss_sum += float(loss.item()) * feature_batch.size(0)
 
-        pred = torch.argmax(logits, dim=1)
-        correct += int((pred == y).sum().item())
-        total += x.size(0)
+        predicted_labels = torch.argmax(logits, dim=1)
+        correct += int((predicted_labels == label_batch).sum().item())
+        total += feature_batch.size(0)
 
-        y_true.extend(y.detach().cpu().numpy().tolist())
-        y_pred.extend(pred.detach().cpu().numpy().tolist())
+        y_true.extend(label_batch.detach().cpu().numpy().tolist())
+        y_pred.extend(predicted_labels.detach().cpu().numpy().tolist())
 
     acc = correct / max(1, total)
     loss_avg = loss_sum / max(1, total)
@@ -454,18 +296,18 @@ def train(args: argparse.Namespace) -> None:
 
     has_subfolders = os.path.isdir(train_dir) and os.path.isdir(val_dir)
 
-    tr_paths: List[str] = []
-    va_paths: List[str] = []
-    te_paths: List[str] = []
+    train_paths: List[str] = []
+    val_paths: List[str] = []
+    test_paths: List[str] = []
 
     if has_subfolders:
         print(f"[DATA] Detected subfolders in {args.data}")
-        tr_paths = sorted(glob.glob(os.path.join(train_dir, "*.npz")))
-        va_paths = sorted(glob.glob(os.path.join(val_dir, "*.npz")))
+        train_paths = sorted(glob.glob(os.path.join(train_dir, "*.npz")))
+        val_paths = sorted(glob.glob(os.path.join(val_dir, "*.npz")))
         if os.path.isdir(test_dir):
-            te_paths = sorted(glob.glob(os.path.join(test_dir, "*.npz")))
-        
-        all_paths = tr_paths + va_paths + te_paths
+            test_paths = sorted(glob.glob(os.path.join(test_dir, "*.npz")))
+
+        all_paths = train_paths + val_paths + test_paths
         if len(all_paths) == 0:
             raise RuntimeError(f"No .npz found in subfolders of: {args.data}")
     else:
@@ -474,7 +316,11 @@ def train(args: argparse.Namespace) -> None:
         all_paths = sorted(glob.glob(os.path.join(args.data, "*.npz")))
         if len(all_paths) == 0:
             raise RuntimeError(f"No .npz found in: {args.data}")
-        tr_paths, va_paths = build_splits(all_paths, val_ratio=args.val_ratio, seed=args.seed)
+        train_paths, val_paths = build_splits(
+            all_paths,
+            val_ratio=args.val_ratio,
+            seed=args.seed,
+        )
         # No implicit test set in this mode
 
     labels = infer_labels(all_paths)
@@ -483,67 +329,76 @@ def train(args: argparse.Namespace) -> None:
 
     print("[DATA] total found:", len(all_paths))
     print("[DATA] labels:", label_map)
-    print(f"[FEAT] stand-focused {FEATURE_DIM} dims")
+    print(f"[FEAT] stand-focused {STAND_FEATURE_DIM} dims")
 
-    print(f"[SPLIT] train: {len(tr_paths)} | val: {len(va_paths)} | test: {len(te_paths)}")
-    print("[SPLIT] train dist:", count_label_dist(tr_paths))
-    print("[SPLIT] val   dist:", count_label_dist(va_paths))
-    if te_paths:
-        print("[SPLIT] test  dist:", count_label_dist(te_paths))
+    print(f"[SPLIT] train: {len(train_paths)} | val: {len(val_paths)} | test: {len(test_paths)}")
+    print("[SPLIT] train dist:", count_label_dist(train_paths))
+    print("[SPLIT] val   dist:", count_label_dist(val_paths))
+    if test_paths:
+        print("[SPLIT] test  dist:", count_label_dist(test_paths))
 
-    tr_samples = [Sample(p, load_npz(p)[2]) for p in tr_paths]
-    va_samples = [Sample(p, load_npz(p)[2]) for p in va_paths]
-    te_samples = [Sample(p, load_npz(p)[2]) for p in te_paths]
+    train_samples = [Sample(path, load_npz(path)[2]) for path in train_paths]
+    val_samples = [Sample(path, load_npz(path)[2]) for path in val_paths]
+    test_samples = [Sample(path, load_npz(path)[2]) for path in test_paths]
 
-    train_ds = StandingNPZDataset(tr_samples, label_map, T=args.T)
-    val_ds = StandingNPZDataset(va_samples, label_map, T=args.T)
-    test_ds = StandingNPZDataset(te_samples, label_map, T=args.T) if te_samples else None
+    train_dataset = StandingNPZDataset(train_samples, label_map, T=args.T)
+    val_dataset = StandingNPZDataset(val_samples, label_map, T=args.T)
+    test_dataset = StandingNPZDataset(test_samples, label_map, T=args.T) if test_samples else None
 
-    train_loader = DataLoader(train_ds, batch_size=args.bs, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=args.bs, shuffle=False, num_workers=0)
-    test_loader = DataLoader(test_ds, batch_size=args.bs, shuffle=False, num_workers=0) if test_ds else None
+    train_loader = DataLoader(train_dataset, batch_size=args.bs, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=args.bs, shuffle=False, num_workers=0)
+    test_loader = (
+        DataLoader(test_dataset, batch_size=args.bs, shuffle=False, num_workers=0)
+        if test_dataset
+        else None
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     print("[DEVICE]", device)
 
     model = SimpleTCN(
-        in_dim=int(train_ds.in_dim),
+        in_dim=int(train_dataset.in_dim),
         num_classes=len(label_map),
         channels=(args.ch, args.ch, args.ch),
         dropout=float(args.dropout),
     ).to(device)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.wd))
-    ce = nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(args.lr),
+        weight_decay=float(args.wd),
+    )
+    criterion = nn.CrossEntropyLoss()
 
     best_val_acc = -1.0
     best_state = None
-    best_ep = -1
+    best_epoch = -1
     
     # Track history
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
 
-    for ep in range(1, int(args.epochs) + 1):
+    for epoch_index in range(1, int(args.epochs) + 1):
         model.train()
         total = 0
         correct = 0
         loss_sum = 0.0
 
-        for x, y in train_loader:
-            x = x.to(device)
-            y = y.to(device)
+        for feature_batch, label_batch in train_loader:
+            feature_batch = feature_batch.to(device)
+            label_batch = label_batch.to(device)
 
-            opt.zero_grad()
-            logits = model(x)
-            loss = ce(logits, y)
+            optimizer.zero_grad()
+            logits = model(feature_batch)
+            loss = criterion(logits, label_batch)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+            optimizer.step()
 
-            loss_sum += float(loss.item()) * x.size(0)
-            pred = torch.argmax(logits, dim=1)
-            correct += int((pred == y).sum().item())
-            total += x.size(0)
+            batch_size = feature_batch.size(0)
+            loss_sum += float(loss.item()) * batch_size
+            predicted_labels = torch.argmax(logits, dim=1)
+            correct += int((predicted_labels == label_batch).sum().item())
+            total += batch_size
 
         tr_loss = loss_sum / max(1, total)
         tr_acc = correct / max(1, total)
@@ -557,16 +412,16 @@ def train(args: argparse.Namespace) -> None:
         history["val_acc"].append(va_acc)
 
         print(
-            f"Epoch {ep:03d}/{args.epochs} | "
+            f"Epoch {epoch_index:03d}/{args.epochs} | "
             f"train loss={tr_loss:.4f} acc={tr_acc:.3f} | "
             f"val loss={va_loss:.4f} acc={va_acc:.3f}"
         )
 
         if va_acc > best_val_acc:
             best_val_acc = va_acc
-            best_ep = ep
+            best_epoch = epoch_index
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            print(f"  -> best updated @epoch {best_ep} | best_val_acc={best_val_acc:.3f}")
+            print(f"  -> best updated @epoch {best_epoch} | best_val_acc={best_val_acc:.3f}")
 
             # Print detailed evaluation for the current best checkpoint.
             _, _, y_t, y_p = evaluate_with_preds(model, val_loader, device)
@@ -574,15 +429,17 @@ def train(args: argparse.Namespace) -> None:
             _print_eval_report(cm, idx_to_label)
 
     print("\n=== SUMMARY ===")
-    print(f"Train samples: {len(tr_paths)}")
-    print(f"Val samples  : {len(va_paths)}")
-    print(f"Best epoch   : {best_ep}")
+    print(f"Train samples: {len(train_paths)}")
+    print(f"Val samples  : {len(val_paths)}")
+    print(f"Best epoch   : {best_epoch}")
     print(f"Best val acc : {best_val_acc:.4f} ({best_val_acc*100:.2f}%)")
 
     # Plot history
     try:
+        import matplotlib.pyplot as plt
+
         plt.figure(figsize=(12, 5))
-        
+
         plt.subplot(1, 2, 1)
         plt.plot(history["train_loss"], label="Train Loss")
         plt.plot(history["val_loss"], label="Val Loss")
@@ -627,16 +484,16 @@ def train(args: argparse.Namespace) -> None:
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
-    ckpt = {
+    checkpoint = {
         "model_state": best_state if best_state is not None else model.state_dict(),
-        "in_dim": FEATURE_DIM,
+        "in_dim": STAND_FEATURE_DIM,
         "T": int(args.T),
         "label_map": label_map,
         "meta": {
             "task": "squat_stand",
             "feature_set": "stand_focused_16d",
             "feat_dim_detail": {
-                "width_ratios": 4, "x_positions": 6, "angles": 3, "distances": 2, "feet_over_shoulder": 1, "total": FEATURE_DIM
+                "width_ratios": 4, "x_positions": 6, "angles": 3, "distances": 2, "feet_over_shoulder": 1, "total": STAND_FEATURE_DIM
             },
             "data_dir": os.path.abspath(args.data),
             "val_ratio": float(args.val_ratio),
@@ -649,16 +506,16 @@ def train(args: argparse.Namespace) -> None:
             "dropout": float(args.dropout),
             "seed": int(args.seed),
             "best_val_acc": float(best_val_acc),
-            "best_epoch": int(best_ep),
+            "best_epoch": int(best_epoch),
         },
     }
 
-    torch.save(ckpt, args.out)
+    torch.save(checkpoint, args.out)
     print("[SAVE] checkpoint:", args.out)
     print("[SAVE] best_val_acc:", best_val_acc)
-    print("[SAVE] best_epoch:", best_ep)
+    print("[SAVE] best_epoch:", best_epoch)
     print("[SAVE] label_map:", json.dumps(label_map, ensure_ascii=False))
-    print("[SAVE] in_dim:", train_ds.in_dim)
+    print("[SAVE] in_dim:", train_dataset.in_dim)
 
 
 def main() -> None:
@@ -671,15 +528,15 @@ def main() -> None:
     ap.add_argument("--out", required=True, help="output .pt path e.g. squat/models/squat_stand_tcn.pt")
 
     ap.add_argument("--T", type=int, default=30, help="resample length")
-    ap.add_argument("--epochs", type=int, default=50)
-    ap.add_argument("--bs", type=int, default=32)
-    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--epochs", type=int, default=75)
+    ap.add_argument("--bs", type=int, default=16)
+    ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--wd", type=float, default=1e-4)
-    ap.add_argument("--dropout", type=float, default=0.1)
-    ap.add_argument("--ch", type=int, default=128)
+    ap.add_argument("--dropout", type=float, default=0.3)
+    ap.add_argument("--ch", type=int, default=64)
 
-    ap.add_argument("--val_ratio", type=float, default=0.35)
-    ap.add_argument("--seed", type=int, default=219)
+    ap.add_argument("--val_ratio", type=float, default=0.3)
+    ap.add_argument("--seed", type=int, default=921)
     ap.add_argument("--cpu", action="store_true")
 
     args = ap.parse_args()

@@ -16,6 +16,22 @@ from .tcn_models import SimpleTCN, PhaseTCN
 from .video_utils import resample_time
 
 
+def _get_simple_tcn_config(
+    checkpoint: Dict[str, Any],
+) -> Tuple[Tuple[int, ...], float]:
+    """Extract SimpleTCN architecture config from checkpoint metadata."""
+    metadata = checkpoint.get("meta", {})
+
+    channels_raw = metadata.get("channels", (128, 128, 128))
+    if isinstance(channels_raw, (list, tuple)) and channels_raw:
+        channels = tuple(int(ch) for ch in channels_raw)
+    else:
+        channels = (128, 128, 128)
+
+    dropout = float(metadata.get("dropout", 0.1))
+    return channels, dropout
+
+
 def load_tcn(path: str) -> Tuple[
     Optional[SimpleTCN],
     Optional[int],
@@ -34,21 +50,25 @@ def load_tcn(path: str) -> Tuple[
         All None if loading fails.
     """
     try:
-        ckpt = torch.load(path, map_location="cpu")
-        in_dim = int(ckpt["in_dim"])
-        t_val = int(ckpt["T"])
-        label_map = ckpt["label_map"]
-        inv = {v: k for k, v in label_map.items()}
+        checkpoint = torch.load(path, map_location="cpu")
+        in_dim = int(checkpoint["in_dim"])
+        target_window_size = int(checkpoint["T"])
+        label_map = checkpoint["label_map"]
+        inverse_label_map = {value: key for key, value in label_map.items()}
+        channels, dropout = _get_simple_tcn_config(checkpoint)
         model = SimpleTCN(
             in_dim=in_dim,
-            num_classes=len(inv),
-            channels=(128, 128, 128),
-            dropout=0.1,
+            num_classes=len(inverse_label_map),
+            channels=channels,
+            dropout=dropout,
         )
-        model.load_state_dict(ckpt["model_state"])
+        model.load_state_dict(checkpoint["model_state"])
         model.eval()
-        print(f"[MODEL] Loaded: {path} in_dim={in_dim} T={t_val} classes={inv}")
-        return model, t_val, inv, in_dim
+        print(
+            f"[MODEL] Loaded: {path} in_dim={in_dim} T={target_window_size} "
+            f"classes={inverse_label_map} channels={channels}"
+        )
+        return model, target_window_size, inverse_label_map, in_dim
     except Exception as e:  # pylint: disable=broad-except
         print(f"[MODEL] Cannot load: {path} err={e}")
         return None, None, None, None
@@ -69,18 +89,18 @@ def load_phase_tcn(
         All None if loading fails.
     """
     try:
-        ckpt = torch.load(path, map_location="cpu")
-        in_dim = int(ckpt.get("in_dim", 10))
-        num_classes = int(ckpt.get("num_classes", 2))
-        window = int(ckpt.get("window", 30))
+        checkpoint = torch.load(path, map_location="cpu")
+        in_dim = int(checkpoint.get("in_dim", 10))
+        num_classes = int(checkpoint.get("num_classes", 2))
+        window_size = int(checkpoint.get("window", 30))
         model = PhaseTCN(in_dim=in_dim, num_classes=num_classes)
-        model.load_state_dict(ckpt["state_dict"])
+        model.load_state_dict(checkpoint["state_dict"])
         model.eval()
         print(
             f"[MODEL] Phase TCN loaded: {path} "
-            f"in_dim={in_dim} window={window} num_classes={num_classes}"
+            f"in_dim={in_dim} window={window_size} num_classes={num_classes}"
         )
-        return model, window, in_dim
+        return model, window_size, in_dim
     except Exception as e:  # pylint: disable=broad-except
         print(f"[MODEL] Cannot load phase TCN: {path} err={e}")
         return None, None, None
@@ -90,7 +110,7 @@ def tcn_predict(
     model: Any,
     inv_labels: Dict[int, str],
     target_t: int,
-    x_win: np.ndarray,
+    feature_window: np.ndarray,
 ) -> Tuple[str, float, np.ndarray]:
     """Run prediction with a SimpleTCN model.
 
@@ -101,17 +121,23 @@ def tcn_predict(
         model: Loaded SimpleTCN model.
         inv_labels: Mapping from class index to label string.
         target_t: Target time dimension for resampling.
-        x_win: Input feature window of shape (T_raw, D).
+        feature_window: Input feature window of shape (T_raw, D).
 
     Returns:
         Tuple of (predicted_label, confidence, probability_array).
     """
-    x = resample_time(x_win.astype(np.float32), int(target_t))
-    xt = torch.from_numpy(x).unsqueeze(0)  # (1, T, D)
+    resampled_feature_window = resample_time(
+        feature_window.astype(np.float32),
+        int(target_t),
+    )
+    feature_window_tensor = torch.from_numpy(resampled_feature_window).unsqueeze(0)
     with torch.no_grad():
-        logits = model(xt)
-        prob = torch.softmax(logits, dim=1).cpu().numpy()[0]
-        pred = int(np.argmax(prob))
-        conf = float(prob[pred])
-        pred_label = inv_labels.get(pred, str(pred))
-    return pred_label, conf, prob
+        logits = model(feature_window_tensor)
+        probabilities = torch.softmax(logits, dim=1).cpu().numpy()[0]
+        predicted_class_index = int(np.argmax(probabilities))
+        confidence = float(probabilities[predicted_class_index])
+        predicted_label = inv_labels.get(
+            predicted_class_index,
+            str(predicted_class_index),
+        )
+    return predicted_label, confidence, probabilities

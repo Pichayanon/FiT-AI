@@ -1,198 +1,369 @@
-"""
-features.py — Squat feature extraction functions.
+"""Shared squat feature extraction functions.
 
-Single source of truth used by both training scripts and squat_streaming.py.
-All three models (phase, stand, bottom) extract features here.
-
-Import in training:
-    from squat.features import extract_phase_features, extract_stand_features, extract_bottom_features
-
-Import in streaming:
-    from squat.features import extract_phase_features, extract_stand_features, extract_bottom_features
+Single source of truth for both training scripts and realtime streaming.
+Each extractor accepts either:
+    - a single MediaPipe landmark list
+    - a single numpy landmark frame shaped like (33, 3/4)
+    - a numpy sequence shaped like (T, 33, 3/4)
 """
 
 from __future__ import annotations
 
-from typing import List
+from typing import Any
 
 import numpy as np
 
-from shared.math_utils import angle_3pts, safe_norm, dist, get_xyz
+from shared.math_utils import angle_3pts, dist, get_xyz, safe_norm
 
 
 # ---------------------------------------------------------------
 # Constants (shared between training and streaming)
 # ---------------------------------------------------------------
 
-BOTTOM_FEATURE_DIM = 41
+PHASE_FEATURE_DIM = 10
 STAND_FEATURE_DIM = 16
+BOTTOM_FEATURE_DIM = 41
 
-KEY_JOINTS = [7, 8, 11, 12, 23, 24, 25, 26, 27, 28]  # L/R: ear, sho, hip, knee, ankle
+LEFT_EAR_INDEX = 7
+RIGHT_EAR_INDEX = 8
+LEFT_SHOULDER_INDEX = 11
+RIGHT_SHOULDER_INDEX = 12
+LEFT_HIP_INDEX = 23
+RIGHT_HIP_INDEX = 24
+LEFT_KNEE_INDEX = 25
+RIGHT_KNEE_INDEX = 26
+LEFT_ANKLE_INDEX = 27
+RIGHT_ANKLE_INDEX = 28
 
-L_SHO, R_SHO = 11, 12
-L_HIP, R_HIP = 23, 24
-L_KNE, R_KNE = 25, 26
-L_ANK, R_ANK = 27, 28
+KEY_JOINT_INDICES = [
+    LEFT_EAR_INDEX,
+    RIGHT_EAR_INDEX,
+    LEFT_SHOULDER_INDEX,
+    RIGHT_SHOULDER_INDEX,
+    LEFT_HIP_INDEX,
+    RIGHT_HIP_INDEX,
+    LEFT_KNEE_INDEX,
+    RIGHT_KNEE_INDEX,
+    LEFT_ANKLE_INDEX,
+    RIGHT_ANKLE_INDEX,
+]
+
+# Backward-compatible aliases used by other squat modules.
+KEY_JOINTS = KEY_JOINT_INDICES
+L_SHO, R_SHO = LEFT_SHOULDER_INDEX, RIGHT_SHOULDER_INDEX
+L_HIP, R_HIP = LEFT_HIP_INDEX, RIGHT_HIP_INDEX
+L_KNE, R_KNE = LEFT_KNEE_INDEX, RIGHT_KNEE_INDEX
+L_ANK, R_ANK = LEFT_ANKLE_INDEX, RIGHT_ANKLE_INDEX
+
+
+# ---------------------------------------------------------------
+# Shared landmark parsing
+# ---------------------------------------------------------------
+
+def _to_single_frame_xyz(landmarks: Any) -> np.ndarray:
+    """Return a single frame of xyz landmarks as shape (33, 3)."""
+    if isinstance(landmarks, np.ndarray):
+        landmark_array = np.asarray(landmarks, dtype=np.float32)
+        if (
+            landmark_array.ndim != 2
+            or landmark_array.shape[0] != 33
+            or landmark_array.shape[1] < 3
+        ):
+            raise ValueError("Expected landmark frame with shape (33, 3/4).")
+        return landmark_array[:, :3].astype(np.float32)
+    return get_xyz(landmarks)
+
+
+def _to_landmark_sequence_xyz(landmark_sequence: np.ndarray) -> np.ndarray:
+    """Return a sequence of xyz landmarks as shape (T, 33, 3)."""
+    landmark_array = np.asarray(landmark_sequence, dtype=np.float32)
+    if (
+        landmark_array.ndim != 3
+        or landmark_array.shape[1] != 33
+        or landmark_array.shape[2] < 3
+    ):
+        raise ValueError("Expected landmark sequence with shape (T, 33, 3/4).")
+    return landmark_array[..., :3].astype(np.float32)
 
 
 # ---------------------------------------------------------------
 # Phase features (10-D) — matches squat/extract_phase.py
 # ---------------------------------------------------------------
 
-def extract_phase_features(lm: list) -> np.ndarray:
-    """Extract 10-dim features for phase TCN.
+def _extract_phase_features_from_single_frame_xyz(frame_xyz: np.ndarray) -> np.ndarray:
+    """Extract 10-dim phase features from a single xyz landmark frame.
 
-    Features: normalized Y positions of 8 joints + 2 knee angles.
-
-    Matches the feature vector produced by squat/extract_phase.py.
+    Feature order:
+        [0] left shoulder height
+        [1] right shoulder height
+        [2] left hip height
+        [3] right hip height
+        [4] left knee height
+        [5] right knee height
+        [6] left ankle height
+        [7] right ankle height
+        [8] left knee angle / 180
+        [9] right knee angle / 180
     """
-    idx_map = {
-        "l_shoulder": L_SHO, "r_shoulder": R_SHO,
-        "l_hip": L_HIP, "r_hip": R_HIP,
-        "l_knee": L_KNE, "r_knee": R_KNE,
-        "l_ankle": L_ANK, "r_ankle": R_ANK,
-    }
-    pts = {}
-    for name, idx in idx_map.items():
-        pts[name] = np.array([lm[idx].x, lm[idx].y], dtype=np.float32)
+    left_shoulder_xy = frame_xyz[LEFT_SHOULDER_INDEX, :2]
+    right_shoulder_xy = frame_xyz[RIGHT_SHOULDER_INDEX, :2]
+    left_hip_xy = frame_xyz[LEFT_HIP_INDEX, :2]
+    right_hip_xy = frame_xyz[RIGHT_HIP_INDEX, :2]
+    left_knee_xy = frame_xyz[LEFT_KNEE_INDEX, :2]
+    right_knee_xy = frame_xyz[RIGHT_KNEE_INDEX, :2]
+    left_ankle_xy = frame_xyz[LEFT_ANKLE_INDEX, :2]
+    right_ankle_xy = frame_xyz[RIGHT_ANKLE_INDEX, :2]
 
-    mid_hip_y = (pts["l_hip"][1] + pts["r_hip"][1]) / 2
-    mid_shoulder_y = (pts["l_shoulder"][1] + pts["r_shoulder"][1]) / 2
-    torso_len = abs(mid_shoulder_y - mid_hip_y) + 1e-6
+    hip_midpoint_y = (left_hip_xy[1] + right_hip_xy[1]) / 2.0
+    shoulder_midpoint_y = (left_shoulder_xy[1] + right_shoulder_xy[1]) / 2.0
+    torso_length = abs(shoulder_midpoint_y - hip_midpoint_y) + 1e-6
 
-    def ny(p: np.ndarray) -> float:
-        return (p[1] - mid_hip_y) / torso_len
+    def normalize_vertical(point_xy: np.ndarray) -> float:
+        return float((point_xy[1] - hip_midpoint_y) / torso_length)
 
-    l_knee_angle = angle_3pts(
-        tuple(pts["l_hip"]), tuple(pts["l_knee"]), tuple(pts["l_ankle"])
+    left_knee_angle = angle_3pts(left_hip_xy, left_knee_xy, left_ankle_xy)
+    right_knee_angle = angle_3pts(right_hip_xy, right_knee_xy, right_ankle_xy)
+
+    return np.array(
+        [
+            normalize_vertical(left_shoulder_xy),
+            normalize_vertical(right_shoulder_xy),
+            normalize_vertical(left_hip_xy),
+            normalize_vertical(right_hip_xy),
+            normalize_vertical(left_knee_xy),
+            normalize_vertical(right_knee_xy),
+            normalize_vertical(left_ankle_xy),
+            normalize_vertical(right_ankle_xy),
+            left_knee_angle / 180.0,
+            right_knee_angle / 180.0,
+        ],
+        dtype=np.float32,
     )
-    r_knee_angle = angle_3pts(
-        tuple(pts["r_hip"]), tuple(pts["r_knee"]), tuple(pts["r_ankle"])
+
+
+def extract_phase_features(landmarks: Any) -> np.ndarray:
+    """Extract 10-dim phase features from one frame or a sequence."""
+    if isinstance(landmarks, np.ndarray) and landmarks.ndim == 3:
+        landmark_sequence_xyz = _to_landmark_sequence_xyz(landmarks)
+        return np.stack(
+            [
+                _extract_phase_features_from_single_frame_xyz(
+                    landmark_sequence_xyz[frame_index]
+                )
+                for frame_index in range(landmark_sequence_xyz.shape[0])
+            ],
+            axis=0,
+        )
+    return _extract_phase_features_from_single_frame_xyz(
+        _to_single_frame_xyz(landmarks)
     )
-    return np.array([
-        ny(pts["l_shoulder"]), ny(pts["r_shoulder"]),
-        ny(pts["l_hip"]),      ny(pts["r_hip"]),
-        ny(pts["l_knee"]),     ny(pts["r_knee"]),
-        ny(pts["l_ankle"]),    ny(pts["r_ankle"]),
-        l_knee_angle / 180.0,  r_knee_angle / 180.0,
-    ], dtype=np.float32)
 
 
 # ---------------------------------------------------------------
 # Stand features (16-D) — matches squat/extract_standing_squat.py
 # ---------------------------------------------------------------
 
-def extract_stand_features(lm: list) -> np.ndarray:
-    """Extract focused stand features (16-D).
+def _extract_stand_features_from_single_frame_xyz(frame_xyz: np.ndarray) -> np.ndarray:
+    """Extract 16-dim stand features from a single xyz landmark frame.
 
-    Dimensions:
-        [0-3]   width ratios: ankle/hip, ankle/sho, knee/hip, knee/sho
-        [4-9]   x positions (norm by hip width): L/R ankle, knee, hip
-        [10-12] angles/180: knee_L, knee_R, torso_tilt
-        [13]    feet distance (ankle_w / scale)
-        [14]    shoulder distance (sho_w / scale)
-        [15]    feet/shoulder ratio (ankle_w / sho_w)
-
-    Matches the feature vector produced by squat/extract_standing_squat.py.
+    Feature order:
+        [0] ankle width / hip width
+        [1] ankle width / shoulder width
+        [2] knee width / hip width
+        [3] knee width / shoulder width
+        [4] left ankle x offset
+        [5] right ankle x offset
+        [6] left knee x offset
+        [7] right knee x offset
+        [8] left hip x offset
+        [9] right hip x offset
+        [10] left knee angle / 180
+        [11] right knee angle / 180
+        [12] torso tilt / 180
+        [13] ankle width / scale
+        [14] shoulder width / scale
+        [15] ankle width / shoulder width
     """
-    xyz = get_xyz(lm)
-    lhip, rhip = xyz[L_HIP], xyz[R_HIP]
-    lsho, rsho = xyz[L_SHO], xyz[R_SHO]
-    lkne, rkne = xyz[L_KNE], xyz[R_KNE]
-    lank, rank = xyz[L_ANK], xyz[R_ANK]
+    left_hip = frame_xyz[LEFT_HIP_INDEX]
+    right_hip = frame_xyz[RIGHT_HIP_INDEX]
+    left_shoulder = frame_xyz[LEFT_SHOULDER_INDEX]
+    right_shoulder = frame_xyz[RIGHT_SHOULDER_INDEX]
+    left_knee = frame_xyz[LEFT_KNEE_INDEX]
+    right_knee = frame_xyz[RIGHT_KNEE_INDEX]
+    left_ankle = frame_xyz[LEFT_ANKLE_INDEX]
+    right_ankle = frame_xyz[RIGHT_ANKLE_INDEX]
 
-    mid_hip = 0.5 * (lhip + rhip)
-    hip_w   = dist(lhip, rhip)
-    sho_w   = dist(lsho, rsho)
-    ankle_w = dist(lank, rank)
-    knee_w  = dist(lkne, rkne)
-    scale   = hip_w if hip_w > 1e-4 else (sho_w if sho_w > 1e-4 else 1.0)
+    hip_midpoint = 0.5 * (left_hip + right_hip)
+    hip_width = dist(left_hip, right_hip)
+    shoulder_width = dist(left_shoulder, right_shoulder)
+    ankle_width = dist(left_ankle, right_ankle)
+    knee_width = dist(left_knee, right_knee)
+    reference_scale = (
+        hip_width if hip_width > 1e-4
+        else (shoulder_width if shoulder_width > 1e-4 else 1.0)
+    )
 
-    out = np.zeros(STAND_FEATURE_DIM, dtype=np.float32)
-    out[0]  = ankle_w / (hip_w + 1e-6)
-    out[1]  = ankle_w / (sho_w + 1e-6)
-    out[2]  = knee_w  / (hip_w + 1e-6)
-    out[3]  = knee_w  / (sho_w + 1e-6)
-    out[4]  = (lank[0] - mid_hip[0]) / (scale + 1e-6)
-    out[5]  = (rank[0] - mid_hip[0]) / (scale + 1e-6)
-    out[6]  = (lkne[0] - mid_hip[0]) / (scale + 1e-6)
-    out[7]  = (rkne[0] - mid_hip[0]) / (scale + 1e-6)
-    out[8]  = (lhip[0] - mid_hip[0]) / (scale + 1e-6)
-    out[9]  = (rhip[0] - mid_hip[0]) / (scale + 1e-6)
-    out[10] = angle_3pts(lhip, lkne, lank) / 180.0
-    out[11] = angle_3pts(rhip, rkne, rank) / 180.0
+    feature_vector = np.zeros(STAND_FEATURE_DIM, dtype=np.float32)
+    feature_vector[0] = ankle_width / (hip_width + 1e-6)
+    feature_vector[1] = ankle_width / (shoulder_width + 1e-6)
+    feature_vector[2] = knee_width / (hip_width + 1e-6)
+    feature_vector[3] = knee_width / (shoulder_width + 1e-6)
+    feature_vector[4] = (left_ankle[0] - hip_midpoint[0]) / (reference_scale + 1e-6)
+    feature_vector[5] = (right_ankle[0] - hip_midpoint[0]) / (reference_scale + 1e-6)
+    feature_vector[6] = (left_knee[0] - hip_midpoint[0]) / (reference_scale + 1e-6)
+    feature_vector[7] = (right_knee[0] - hip_midpoint[0]) / (reference_scale + 1e-6)
+    feature_vector[8] = (left_hip[0] - hip_midpoint[0]) / (reference_scale + 1e-6)
+    feature_vector[9] = (right_hip[0] - hip_midpoint[0]) / (reference_scale + 1e-6)
+    feature_vector[10] = angle_3pts(left_hip, left_knee, left_ankle) / 180.0
+    feature_vector[11] = angle_3pts(right_hip, right_knee, right_ankle) / 180.0
 
-    mid_sho = 0.5 * (lsho + rsho)
-    v   = (mid_sho - mid_hip).astype(np.float32)
-    up  = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-    denom   = (safe_norm(v) * safe_norm(up)) + 1e-6
-    cosang  = float(np.clip(np.dot(v, up) / denom, -1.0, 1.0))
-    out[12] = float(np.degrees(np.arccos(cosang))) / 180.0
-    out[13] = ankle_w / (scale + 1e-6)
-    out[14] = sho_w   / (scale + 1e-6)
-    out[15] = ankle_w / (sho_w + 1e-6)
+    shoulder_midpoint = 0.5 * (left_shoulder + right_shoulder)
+    torso_vector = (shoulder_midpoint - hip_midpoint).astype(np.float32)
+    vertical_up_vector = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    torso_tilt_denominator = (
+        safe_norm(torso_vector) * safe_norm(vertical_up_vector)
+    ) + 1e-6
+    torso_tilt_cosine = float(
+        np.clip(
+            np.dot(torso_vector, vertical_up_vector) / torso_tilt_denominator,
+            -1.0,
+            1.0,
+        )
+    )
+    feature_vector[12] = float(np.degrees(np.arccos(torso_tilt_cosine))) / 180.0
+    feature_vector[13] = ankle_width / (reference_scale + 1e-6)
+    feature_vector[14] = shoulder_width / (reference_scale + 1e-6)
+    feature_vector[15] = ankle_width / (shoulder_width + 1e-6)
+    return feature_vector
 
-    return out
+
+def extract_stand_features(landmarks: Any) -> np.ndarray:
+    """Extract 16-dim stand features from one frame or a sequence."""
+    if isinstance(landmarks, np.ndarray) and landmarks.ndim == 3:
+        landmark_sequence_xyz = _to_landmark_sequence_xyz(landmarks)
+        return np.stack(
+            [
+                _extract_stand_features_from_single_frame_xyz(
+                    landmark_sequence_xyz[frame_index]
+                )
+                for frame_index in range(landmark_sequence_xyz.shape[0])
+            ],
+            axis=0,
+        )
+    return _extract_stand_features_from_single_frame_xyz(
+        _to_single_frame_xyz(landmarks)
+    )
 
 
 # ---------------------------------------------------------------
 # Bottom features (41-D) — matches squat/extract_bottom_squat.py
 # ---------------------------------------------------------------
 
-def extract_bottom_features(lm: list) -> np.ndarray:
-    """Extract focused bottom features (41-D).
+def _extract_bottom_features_from_single_frame_xyz(frame_xyz: np.ndarray) -> np.ndarray:
+    """Extract 41-dim bottom features from a single xyz landmark frame.
 
-    Dimensions:
-        [0-29]  10 key joints × 3 xyz (body-centric, hip-width normalized)
-        [30-36] angles/180: knee_L, knee_R, hip_L, hip_R, torso_tilt, neck_tilt, spine
-        [37-40] width ratios: knee/hip, knee/ankle, ankle/hip, sho/hip
-
-    Matches the feature vector produced by squat/extract_bottom_squat.py.
+    Feature order:
+        [0-29]  left/right ear, shoulder, hip, knee, ankle xyz
+        [30]    left knee angle / 180
+        [31]    right knee angle / 180
+        [32]    left hip angle / 180
+        [33]    right hip angle / 180
+        [34]    torso tilt / 180
+        [35]    neck tilt / 180
+        [36]    spine angle / 180
+        [37]    knee width / hip width
+        [38]    knee width / ankle width
+        [39]    ankle width / hip width
+        [40]    shoulder width / hip width
     """
-    xyz   = get_xyz(lm)
-    lear, rear = xyz[7],  xyz[8]
-    lhip, rhip = xyz[23], xyz[24]
-    lsho, rsho = xyz[11], xyz[12]
-    lkne, rkne = xyz[25], xyz[26]
-    lank, rank = xyz[27], xyz[28]
+    left_ear = frame_xyz[LEFT_EAR_INDEX]
+    right_ear = frame_xyz[RIGHT_EAR_INDEX]
+    left_hip = frame_xyz[LEFT_HIP_INDEX]
+    right_hip = frame_xyz[RIGHT_HIP_INDEX]
+    left_shoulder = frame_xyz[LEFT_SHOULDER_INDEX]
+    right_shoulder = frame_xyz[RIGHT_SHOULDER_INDEX]
+    left_knee = frame_xyz[LEFT_KNEE_INDEX]
+    right_knee = frame_xyz[RIGHT_KNEE_INDEX]
+    left_ankle = frame_xyz[LEFT_ANKLE_INDEX]
+    right_ankle = frame_xyz[RIGHT_ANKLE_INDEX]
 
-    mid_hip = 0.5 * (lhip + rhip)
-    hip_w   = dist(lhip, rhip)
-    sho_w   = dist(lsho, rsho)
-    scale   = hip_w if hip_w > 1e-4 else (sho_w if sho_w > 1e-4 else 1.0)
+    hip_midpoint = 0.5 * (left_hip + right_hip)
+    hip_width = dist(left_hip, right_hip)
+    shoulder_width = dist(left_shoulder, right_shoulder)
+    reference_scale = (
+        hip_width if hip_width > 1e-4
+        else (shoulder_width if shoulder_width > 1e-4 else 1.0)
+    )
 
-    out = np.zeros(BOTTOM_FEATURE_DIM, dtype=np.float32)
+    feature_vector = np.zeros(BOTTOM_FEATURE_DIM, dtype=np.float32)
 
-    for i, j_idx in enumerate(KEY_JOINTS):
-        normed = (xyz[j_idx] - mid_hip) / (scale + 1e-6)
-        out[i * 3:(i + 1) * 3] = normed
+    for joint_offset, joint_index in enumerate(KEY_JOINT_INDICES):
+        start_index = joint_offset * 3
+        end_index = start_index + 3
+        feature_vector[start_index:end_index] = (
+            frame_xyz[joint_index] - hip_midpoint
+        ) / (reference_scale + 1e-6)
 
-    out[30] = angle_3pts(lhip, lkne, lank) / 180.0
-    out[31] = angle_3pts(rhip, rkne, rank) / 180.0
-    out[32] = angle_3pts(lsho, lhip, lkne) / 180.0
-    out[33] = angle_3pts(rsho, rhip, rkne) / 180.0
+    feature_vector[30] = angle_3pts(left_hip, left_knee, left_ankle) / 180.0
+    feature_vector[31] = angle_3pts(right_hip, right_knee, right_ankle) / 180.0
+    feature_vector[32] = angle_3pts(left_shoulder, left_hip, left_knee) / 180.0
+    feature_vector[33] = angle_3pts(right_shoulder, right_hip, right_knee) / 180.0
 
-    mid_sho = 0.5 * (lsho + rsho)
-    mid_ear = 0.5 * (lear + rear)
-    up      = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    shoulder_midpoint = 0.5 * (left_shoulder + right_shoulder)
+    ear_midpoint = 0.5 * (left_ear + right_ear)
+    vertical_up_vector = np.array([0.0, 1.0, 0.0], dtype=np.float32)
 
-    v      = (mid_sho - mid_hip).astype(np.float32)
-    denom  = (safe_norm(v) * safe_norm(up)) + 1e-6
-    cosang = float(np.clip(np.dot(v, up) / denom, -1.0, 1.0))
-    out[34] = float(np.degrees(np.arccos(cosang))) / 180.0
+    torso_vector = (shoulder_midpoint - hip_midpoint).astype(np.float32)
+    torso_tilt_denominator = (
+        safe_norm(torso_vector) * safe_norm(vertical_up_vector)
+    ) + 1e-6
+    torso_tilt_cosine = float(
+        np.clip(
+            np.dot(torso_vector, vertical_up_vector) / torso_tilt_denominator,
+            -1.0,
+            1.0,
+        )
+    )
+    feature_vector[34] = float(np.degrees(np.arccos(torso_tilt_cosine))) / 180.0
 
-    v_neck      = (mid_ear - mid_sho).astype(np.float32)
-    denom_neck  = (safe_norm(v_neck) * safe_norm(up)) + 1e-6
-    cosang_neck = float(np.clip(np.dot(v_neck, up) / denom_neck, -1.0, 1.0))
-    out[35] = float(np.degrees(np.arccos(cosang_neck))) / 180.0
+    neck_vector = (ear_midpoint - shoulder_midpoint).astype(np.float32)
+    neck_tilt_denominator = (
+        safe_norm(neck_vector) * safe_norm(vertical_up_vector)
+    ) + 1e-6
+    neck_tilt_cosine = float(
+        np.clip(
+            np.dot(neck_vector, vertical_up_vector) / neck_tilt_denominator,
+            -1.0,
+            1.0,
+        )
+    )
+    feature_vector[35] = float(np.degrees(np.arccos(neck_tilt_cosine))) / 180.0
 
-    out[36] = angle_3pts(mid_ear, mid_sho, mid_hip) / 180.0
+    feature_vector[36] = angle_3pts(ear_midpoint, shoulder_midpoint, hip_midpoint) / 180.0
 
-    knee_w  = dist(lkne, rkne)
-    ankle_w = dist(lank, rank)
-    out[37] = knee_w  / (hip_w + 1e-6)
-    out[38] = knee_w  / (ankle_w + 1e-6)
-    out[39] = ankle_w / (hip_w + 1e-6)
-    out[40] = sho_w   / (hip_w + 1e-6)
+    knee_width = dist(left_knee, right_knee)
+    ankle_width = dist(left_ankle, right_ankle)
+    feature_vector[37] = knee_width / (hip_width + 1e-6)
+    feature_vector[38] = knee_width / (ankle_width + 1e-6)
+    feature_vector[39] = ankle_width / (hip_width + 1e-6)
+    feature_vector[40] = shoulder_width / (hip_width + 1e-6)
 
-    return out
+    return feature_vector
+
+
+def extract_bottom_features(landmarks: Any) -> np.ndarray:
+    """Extract 41-dim bottom features from one frame or a sequence."""
+    if isinstance(landmarks, np.ndarray) and landmarks.ndim == 3:
+        landmark_sequence_xyz = _to_landmark_sequence_xyz(landmarks)
+        return np.stack(
+            [
+                _extract_bottom_features_from_single_frame_xyz(
+                    landmark_sequence_xyz[frame_index]
+                )
+                for frame_index in range(landmark_sequence_xyz.shape[0])
+            ],
+            axis=0,
+        )
+    return _extract_bottom_features_from_single_frame_xyz(
+        _to_single_frame_xyz(landmarks)
+    )

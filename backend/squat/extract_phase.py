@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+if __package__ in {None, ""}:
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import argparse
 import json
 import os
@@ -8,6 +14,8 @@ from typing import Dict, List
 import cv2
 import mediapipe as mp
 import numpy as np
+
+from squat.features import extract_phase_features
 
 
 # -----------------------------
@@ -18,65 +26,6 @@ PHASE_MAP = {
     "eccentric": 0,
     "concentric": 1,
 }
-
-IMPORTANT_LANDMARKS = {
-    "l_shoulder": 11,
-    "l_hip": 23,
-    "l_knee": 25,
-    "l_ankle": 27,
-    "r_shoulder": 12,
-    "r_hip": 24,
-    "r_knee": 26,
-    "r_ankle": 28,
-}
-
-
-# -----------------------------
-# Helpers
-# -----------------------------
-
-def angle_2d(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
-    ba = a - b
-    bc = c - b
-    cos_angle = np.dot(ba, bc) / (
-        np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6
-    )
-    return np.degrees(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
-
-
-def extract_features(lm):
-    pts = {}
-    for name, idx in IMPORTANT_LANDMARKS.items():
-        pts[name] = np.array([lm[idx].x, lm[idx].y], dtype=np.float32)
-
-    mid_hip_y = (pts["l_hip"][1] + pts["r_hip"][1]) / 2
-    mid_shoulder_y = (pts["l_shoulder"][1] + pts["r_shoulder"][1]) / 2
-    torso_len = abs(mid_shoulder_y - mid_hip_y) + 1e-6
-
-    def ny(p):
-        return (p[1] - mid_hip_y) / torso_len
-
-    l_knee_angle = angle_2d(
-        pts["l_hip"], pts["l_knee"], pts["l_ankle"]
-    )
-    r_knee_angle = angle_2d(
-        pts["r_hip"], pts["r_knee"], pts["r_ankle"]
-    )
-
-    return np.array([
-        ny(pts["l_shoulder"]),
-        ny(pts["r_shoulder"]),
-        ny(pts["l_hip"]),
-        ny(pts["r_hip"]),
-        ny(pts["l_knee"]),
-        ny(pts["r_knee"]),
-        ny(pts["l_ankle"]),
-        ny(pts["r_ankle"]),
-        l_knee_angle / 180.0,
-        r_knee_angle / 180.0,
-    ], dtype=np.float32)
-
-
 
 def overlay_text(frame, text, x=20, y=30):
     cv2.putText(
@@ -110,8 +59,8 @@ def main():
 
     vidname = os.path.splitext(os.path.basename(args.video))[0]
 
-    with open(args.labels, "r") as f:
-        raw_ranges: Dict[str, List[List[int]]] = json.load(f)
+    with open(args.labels, "r") as label_file:
+        raw_ranges: Dict[str, List[List[int]]] = json.load(label_file)
 
     # 🔥 Merge stand → eccentric
     label_ranges = {
@@ -157,23 +106,25 @@ def main():
                 break
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            res = pose.process(rgb)
+            pose_result = pose.process(rgb)
 
             label = frame_to_label(frame_idx)
 
-            if res.pose_landmarks:
-                feats = extract_features(res.pose_landmarks.landmark)
+            if pose_result.pose_landmarks:
+                frame_feature_vector = extract_phase_features(
+                    pose_result.pose_landmarks.landmark
+                )
                 mask = 1
                 mp_draw.draw_landmarks(
                     frame,
-                    res.pose_landmarks,
+                    pose_result.pose_landmarks,
                     mp_pose.POSE_CONNECTIONS,
                 )
             else:
-                feats = np.zeros((10,), dtype=np.float32)
+                frame_feature_vector = np.zeros((10,), dtype=np.float32)
                 mask = 0
 
-            features_seq.append(feats)
+            features_seq.append(frame_feature_vector)
             labels_seq.append(label)
             mask_seq.append(mask)
 
