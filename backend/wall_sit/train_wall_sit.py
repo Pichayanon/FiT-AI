@@ -3,6 +3,11 @@ import os
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
+if __package__ in {None, ""}:
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import cv2
 import joblib
 import mediapipe as mp
@@ -73,17 +78,17 @@ class WallSitFeatureExtractor:
             if not ret:
                 break
 
-            img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            res = self._pose.process(img)
-            if not res.pose_landmarks:
+            image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pose_result = self._pose.process(image_rgb)
+            if not pose_result.pose_landmarks:
                 continue
 
-            lm = res.pose_landmarks.landmark
+            landmarks = pose_result.pose_landmarks.landmark
 
-            right_vis = lm[mp_pose.PoseLandmark.RIGHT_HIP].visibility
-            left_vis = lm[mp_pose.PoseLandmark.LEFT_HIP].visibility
-            side = "right" if right_vis > left_vis else "left"
-            frame_features.append(extract_frame_features(lm, side))
+            right_visibility = landmarks[mp_pose.PoseLandmark.RIGHT_HIP].visibility
+            left_visibility = landmarks[mp_pose.PoseLandmark.LEFT_HIP].visibility
+            side = "right" if right_visibility > left_visibility else "left"
+            frame_features.append(extract_frame_features(landmarks, side))
 
         cap.release()
 
@@ -103,8 +108,8 @@ class WallSitTrainer:
         self.model: Optional[Pipeline] = None
 
     def build_dataset(self) -> Tuple[np.ndarray, np.ndarray]:
-        X: List[List[float]] = []
-        y: List[int] = []
+        feature_matrix: List[List[float]] = []
+        label_array: List[int] = []
 
         print(f"[DATA] Loading videos from {self.config.base_dir}...")
         for label, folder in self.config.label_map.items():
@@ -119,18 +124,18 @@ class WallSitTrainer:
                 if f.endswith((".mp4", ".MOV", ".mov"))
             ]
 
-            for v in videos:
-                feat = self.extractor.extract(v)
-                if feat is not None:
-                    X.append(feat)
-                    y.append(label)
+            for video_path in videos:
+                feature_vector = self.extractor.extract(video_path)
+                if feature_vector is not None:
+                    feature_matrix.append(feature_vector)
+                    label_array.append(label)
 
-        X_arr = np.asarray(X, dtype=np.float32)
-        y_arr = np.asarray(y, dtype=np.int64)
+        feature_matrix_array = np.asarray(feature_matrix, dtype=np.float32)
+        label_array_values = np.asarray(label_array, dtype=np.int64)
 
-        print("Dataset shape:", X_arr.shape)
-        print("Classes:", np.unique(y_arr))
-        return X_arr, y_arr
+        print("Dataset shape:", feature_matrix_array.shape)
+        print("Classes:", np.unique(label_array_values))
+        return feature_matrix_array, label_array_values
 
     def create_model(self) -> Pipeline:
         return Pipeline(

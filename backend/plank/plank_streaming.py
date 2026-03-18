@@ -23,6 +23,12 @@ Run (from backend/):
 
 from __future__ import annotations
 
+if __package__ in {None, ""}:
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import os
 import time
 import warnings
@@ -44,7 +50,7 @@ from shared.sklearn_model_service import SklearnModelService
 from shared.label_mapper import LabelMapper
 from shared.side_gate import SideGate
 from shared.status_sender import StatusSender
-from plank.feature_extractor import FeatureExtractor
+from plank.feature_extractor import PlankFeatureExtractor
 from plank.session import PlankWebSocketSession
 
 
@@ -108,7 +114,7 @@ label_mapper = LabelMapper(LABELS)
 
 mp_pose = mp.solutions.pose
 side_gate = SideGate(mp_pose=mp_pose, side_mode=SIDE_MODE, vis_th=VIS_TH)
-feature_extractor = FeatureExtractor(mp_pose=mp_pose)
+feature_extractor = PlankFeatureExtractor(mp_pose=mp_pose)
 
 status_sender = StatusSender(every_n_frames=STATUS_SEND_EVERY_N_FRAMES)
 
@@ -144,7 +150,7 @@ async def ws_video(websocket: WebSocket) -> None:
         websocket=websocket,
         model_svc=model_service,
         gate=side_gate,
-        feat=feature_extractor,
+        feature_extractor=feature_extractor,
         labels=label_mapper,
         status=status_sender,
         window_frames=WINDOW_FRAMES,

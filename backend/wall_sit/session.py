@@ -38,7 +38,7 @@ class StreamState:
     """Session-level state for a wall sit streaming WebSocket connection."""
 
     started: bool = False
-    foot_wall_vals: List[Tuple[float, float, float]] = field(default_factory=list)
+    frame_feature_values: List[Tuple[float, float, float]] = field(default_factory=list)
     stand_streak: int = 0
 
     # Gate
@@ -90,31 +90,35 @@ class WallSitFeatureExtractor:
         self.mp_pose = mp_pose
 
     def extract_features(
-        self, res: Any, side: str
+        self,
+        pose_result: Any,
+        side: str,
     ) -> Optional[Tuple[float, float, float]]:
         """Extract per-frame feature tuple for wall sit.
 
         Args:
-            res: MediaPipe pose result.
+            pose_result: MediaPipe pose result.
             side: "left" or "right".
 
         Returns:
             Tuple of (foot_wall_norm, knee_angle, torso_alignment),
             or None if landmarks are missing.
         """
-        if not res.pose_landmarks:
+        if not pose_result.pose_landmarks:
             return None
 
-        return extract_frame_features(res.pose_landmarks.landmark, side)
+        return extract_frame_features(pose_result.pose_landmarks.landmark, side)
 
     @staticmethod
-    def aggregate_window(vals: List[Tuple[float, float, float]]) -> np.ndarray:
+    def aggregate_window(
+        frame_feature_values: List[Tuple[float, float, float]]
+    ) -> np.ndarray:
         """Aggregate a window of per-frame tuples into a 5-D feature vector.
 
         Returns:
             Array of [mean_fw, std_fw, mean_knee, min_knee, mean_torso].
         """
-        return aggregate_window(vals)
+        return aggregate_window(frame_feature_values)
 
 
 # ---------------------------------------------------------------
@@ -134,7 +138,7 @@ class WallSitWebSocketSession(BaseWebSocketSession):
         websocket: WebSocket,
         model_svc: SklearnModelService,
         gate: SideGate,
-        feat: WallSitFeatureExtractor,
+        feature_extractor: WallSitFeatureExtractor,
         labels: LabelMapper,
         status: StatusSender,
         window_frames: int,
@@ -159,7 +163,7 @@ class WallSitWebSocketSession(BaseWebSocketSession):
         self.ws = websocket
         self.model_svc = model_svc
         self.gate = gate
-        self.feat = feat
+        self.feature_extractor = feature_extractor
         self.labels = labels
         self.status = status
         self.window_frames = int(window_frames)
@@ -237,7 +241,7 @@ class WallSitWebSocketSession(BaseWebSocketSession):
 
     def _reset_gate_and_buffers(self, reset_watchdog: bool) -> None:
         """Reset gate state, feature buffers, and optionally watchdogs."""
-        self.st.foot_wall_vals.clear()
+        self.st.frame_feature_values.clear()
         self.st.stand_streak = 0
         self.st.ready = False
         self.st.ready_streak = 0
@@ -277,21 +281,21 @@ class WallSitWebSocketSession(BaseWebSocketSession):
 
         # Step 3: Run pose detection
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = self.pose.process(img_rgb)
+        pose_result = self.pose.process(img_rgb)
 
         # Step 4: Side-view gate
         side_debug: Dict[str, Any] = {}
         chosen_side: Optional[str] = None
 
-        if res.pose_landmarks:
-            lm = res.pose_landmarks.landmark
+        if pose_result.pose_landmarks:
+            landmarks = pose_result.pose_landmarks.landmark
             if self.st.ready and self.st.chosen_side is not None:
                 chosen_side = self.st.chosen_side
             else:
-                chosen_side, side_debug = self.gate.choose_best_side(lm)
+                chosen_side, side_debug = self.gate.choose_best_side(landmarks)
 
         # Gate failure: NO_POSE watchdog + DARK watchdog
-        if (not res.pose_landmarks) or (chosen_side is None):
+        if (not pose_result.pose_landmarks) or (chosen_side is None):
             await self._handle_no_pose(too_dark, brightness_mean, side_debug)
             return
 
@@ -322,7 +326,7 @@ class WallSitWebSocketSession(BaseWebSocketSession):
         # First time ready: enter BUFFERING
         if (not self.st.ready) and (self.st.ready_streak >= self.ready_streak_n):
             self.st.ready = True
-            self.st.foot_wall_vals.clear()
+            self.st.frame_feature_values.clear()
             self.st.last_sent_label = ""
             self.st.last_sent_conf = None
 
@@ -343,17 +347,20 @@ class WallSitWebSocketSession(BaseWebSocketSession):
                 self.ws, self.st, self.phase_buffering,
                 {
                     "chosen_side": self.st.chosen_side,
-                    "window_fill": len(self.st.foot_wall_vals),
+                    "window_fill": len(self.st.frame_feature_values),
                     "window_size": self.window_frames,
                 },
             )
             return
 
         # Step 6: Extract features
-        feat_tuple = self.feat.extract_features(res, self.st.chosen_side)
+        frame_feature_tuple = self.feature_extractor.extract_features(
+            pose_result,
+            self.st.chosen_side,
+        )
 
-        if feat_tuple is None:
-            self.st.foot_wall_vals.clear()
+        if frame_feature_tuple is None:
+            self.st.frame_feature_values.clear()
             self.st.stand_streak = 0
             await self.status.send_status(
                 self.ws, self.st, self.phase_buffering,
@@ -366,7 +373,7 @@ class WallSitWebSocketSession(BaseWebSocketSession):
             return
 
         # Step 7: Standing gate — avoid predicting while standing upright
-        knee_angle = float(feat_tuple[1])
+        knee_angle = float(frame_feature_tuple[1])
         if knee_angle >= self.stand_knee_angle_deg_th:
             self.st.stand_streak += 1
         else:
@@ -378,7 +385,7 @@ class WallSitWebSocketSession(BaseWebSocketSession):
                     f"[WALLSIT] STANDING gate: session_id={self.st.session_id} "
                     f"side={self.st.chosen_side} knee_angle={knee_angle:.1f} th={self.stand_knee_angle_deg_th}"
                 )
-            self.st.foot_wall_vals.clear()
+            self.st.frame_feature_values.clear()
             await self.status.send_status(
                 self.ws, self.st, self.phase_have_pose,
                 {
@@ -394,15 +401,15 @@ class WallSitWebSocketSession(BaseWebSocketSession):
             )
             return
 
-        self.st.foot_wall_vals.append(feat_tuple)
+        self.st.frame_feature_values.append(frame_feature_tuple)
 
         # Step 8: Not enough frames yet: BUFFERING
-        if len(self.st.foot_wall_vals) < self.window_frames:
+        if len(self.st.frame_feature_values) < self.window_frames:
             await self.status.send_status(
                 self.ws, self.st, self.phase_buffering,
                 {
                     "chosen_side": self.st.chosen_side,
-                    "window_fill": len(self.st.foot_wall_vals),
+                    "window_fill": len(self.st.frame_feature_values),
                     "window_size": self.window_frames,
                 },
             )
@@ -413,15 +420,17 @@ class WallSitWebSocketSession(BaseWebSocketSession):
             self.ws, self.st, self.phase_inferencing,
             {
                 "chosen_side": self.st.chosen_side,
-                "window_fill": len(self.st.foot_wall_vals),
+                "window_fill": len(self.st.frame_feature_values),
                 "window_size": self.window_frames,
             },
         )
 
-        vals = self.st.foot_wall_vals[-self.window_frames:]
-        agg_feat = self.feat.aggregate_window(vals)
+        feature_window_values = self.st.frame_feature_values[-self.window_frames:]
+        aggregated_feature_vector = self.feature_extractor.aggregate_window(
+            feature_window_values
+        )
 
-        pred_id, conf = self.model_svc.predict(agg_feat)
+        pred_id, conf = self.model_svc.predict(aggregated_feature_vector)
         pred_label = self.labels.label_of(pred_id)
 
         self.st.last_pred_label = pred_label
@@ -441,8 +450,10 @@ class WallSitWebSocketSession(BaseWebSocketSession):
         await self.ws.send_text(json.dumps(payload))
 
         # Bound feature buffer to prevent unbounded growth
-        if len(self.st.foot_wall_vals) > (self.window_frames + 60):
-            self.st.foot_wall_vals = self.st.foot_wall_vals[-(self.window_frames + 60):]
+        if len(self.st.frame_feature_values) > (self.window_frames + 60):
+            self.st.frame_feature_values = self.st.frame_feature_values[
+                -(self.window_frames + 60):
+            ]
 
     # ---------------------------------------------------------------
     # Watchdog handlers

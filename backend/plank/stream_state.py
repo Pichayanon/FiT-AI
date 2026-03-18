@@ -10,7 +10,7 @@ class StreamState:
 
     started: bool = False
     # Per-frame features: (signed_dist, hip_height_norm, body_angle)
-    feats: List[Tuple[float, float, float]] = field(default_factory=list)
+    frame_feature_values: List[Tuple[float, float, float]] = field(default_factory=list)
 
     # Gate
     ready: bool = False
@@ -42,4 +42,3 @@ class StreamState:
     # DARK watchdog
     dark_since: Optional[float] = None
     dark_alerted: bool = False
-

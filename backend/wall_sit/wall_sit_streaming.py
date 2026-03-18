@@ -20,6 +20,12 @@ Server -> iOS:
 
 from __future__ import annotations
 
+if __package__ in {None, ""}:
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import json
 import os
 import time
@@ -108,10 +114,6 @@ STAND_STREAK_N = 3
 app = make_app("FiT-AI WallSit Streaming Backend")
 
 
-
-
-
-
 # ---------------------------------------------------------------
 # Shared service instances
 # ---------------------------------------------------------------
@@ -157,7 +159,7 @@ async def ws_video(websocket: WebSocket) -> None:
         websocket=websocket,
         model_svc=model_service,
         gate=side_gate,
-        feat=feature_extractor,
+        feature_extractor=feature_extractor,
         labels=label_mapper,
         status=status_sender,
         window_frames=WINDOW_FRAMES,
