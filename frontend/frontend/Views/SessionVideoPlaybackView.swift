@@ -7,7 +7,25 @@ struct SessionMistakePlayback: Identifiable {
     let title: String
     let subtitle: String?
     let videoURL: URL
-    let atSecond: Int
+    let atSecond: Double
+    let clipStartSecond: Double
+    let clipDurationSeconds: Double
+
+    init(
+        title: String,
+        subtitle: String?,
+        videoURL: URL,
+        atSecond: Double,
+        leadingPadding: Double = 2.0,
+        trailingPadding: Double = 1.5
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.videoURL = videoURL
+        self.atSecond = atSecond
+        self.clipStartSecond = max(0, atSecond - leadingPadding)
+        self.clipDurationSeconds = max(2.5, leadingPadding + trailingPadding)
+    }
 }
 
 /// Full-screen player sheet that seeks to the selected mistake timestamp on open.
@@ -19,7 +37,7 @@ struct SessionVideoPlaybackView: View {
 
     init(playback: SessionMistakePlayback) {
         self.playback = playback
-        _player = State(initialValue: AVPlayer(url: playback.videoURL))
+        _player = State(initialValue: Self.makePlayer(for: playback))
     }
 
     var body: some View {
@@ -61,18 +79,10 @@ struct SessionVideoPlaybackView: View {
                                 .foregroundColor(.gray)
                         }
 
-                        Text("We jump straight to the selected mistake moment so you can review your form immediately.")
+                        Text(mistakeExplanation)
                             .font(.subheadline)
                             .foregroundColor(.white.opacity(0.78))
                             .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    if let subtitle = playback.subtitle {
-                        ReplayInfoChip(
-                            icon: "figure.strengthtraining.traditional",
-                            label: "Context",
-                            value: subtitle
-                        )
                     }
                 }
                 .padding(18)
@@ -103,10 +113,16 @@ struct SessionVideoPlaybackView: View {
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Mistake Replay")
-                    .font(.title3)
-                    .fontWeight(.bold)
-                    .foregroundColor(.white)
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.title3)
+                        .foregroundColor(.yellow)
+
+                    Text("Mistake Replay")
+                        .font(.title3)
+                        .fontWeight(.bold)
+                        .foregroundColor(.white)
+                }
 
                 Text("See exactly where the form started to break.")
                     .font(.subheadline)
@@ -130,65 +146,136 @@ struct SessionVideoPlaybackView: View {
     }
 
     private var playerCard: some View {
-        ZStack(alignment: .topLeading) {
-            VideoPlayer(player: player)
-                .frame(maxWidth: .infinity)
-                .frame(height: 340)
-                .background(Color.black)
-                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                )
-
-            ReplayInfoChip(
-                icon: "play.circle.fill",
-                label: "Replay",
-                value: "Selected mistake"
+        VideoPlayer(player: player)
+            .frame(maxWidth: .infinity)
+            .frame(height: 340)
+            .background(Color.black)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
             )
-            .padding(14)
-        }
     }
 
     private func startPlayback() {
-        let targetSecond = max(0, playback.atSecond - 1)
-        let targetTime = CMTime(seconds: Double(targetSecond), preferredTimescale: 600)
-        player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+        let clipDuration = playback.clipDurationSeconds
+        let currentDuration = player.currentItem?.duration.seconds ?? 0
+        let startSecond = currentDuration > clipDuration + 0.25 ? playback.clipStartSecond : 0
+        let startTime = CMTime(seconds: startSecond, preferredTimescale: 600)
+
+        player.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
             player.play()
         }
     }
-}
 
-private struct ReplayInfoChip: View {
-    let icon: String
-    let label: String
-    let value: String
+    private static func makePlayer(for playback: SessionMistakePlayback) -> AVPlayer {
+        let asset = AVURLAsset(url: playback.videoURL)
+        let composition = AVMutableComposition()
+        let startTime = CMTime(seconds: playback.clipStartSecond, preferredTimescale: 600)
+        let duration = CMTime(seconds: playback.clipDurationSeconds, preferredTimescale: 600)
+        let timeRange = CMTimeRange(start: startTime, duration: duration)
 
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.subheadline)
-                .foregroundColor(.yellow)
+        var didInsertVideo = false
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label.uppercased())
-                    .font(.caption2)
-                    .fontWeight(.bold)
-                    .foregroundColor(.gray)
-                Text(value)
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                    .foregroundColor(.white)
-                    .lineLimit(1)
+        if let sourceVideoTrack = asset.tracks(withMediaType: .video).first,
+           let compositionVideoTrack = composition.addMutableTrack(
+               withMediaType: .video,
+               preferredTrackID: kCMPersistentTrackID_Invalid
+           ) {
+            do {
+                try compositionVideoTrack.insertTimeRange(timeRange, of: sourceVideoTrack, at: .zero)
+                compositionVideoTrack.preferredTransform = sourceVideoTrack.preferredTransform
+                didInsertVideo = true
+            } catch {
+                print("[SessionVideoPlaybackView] Video clip build error: \(error)")
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color.black.opacity(0.36))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+
+        if let sourceAudioTrack = asset.tracks(withMediaType: .audio).first,
+           let compositionAudioTrack = composition.addMutableTrack(
+               withMediaType: .audio,
+               preferredTrackID: kCMPersistentTrackID_Invalid
+           ) {
+            do {
+                try compositionAudioTrack.insertTimeRange(timeRange, of: sourceAudioTrack, at: .zero)
+            } catch {
+                print("[SessionVideoPlaybackView] Audio clip build error: \(error)")
+            }
+        }
+
+        if didInsertVideo {
+            let item = AVPlayerItem(asset: composition)
+            let player = AVPlayer(playerItem: item)
+            player.actionAtItemEnd = .pause
+            return player
+        }
+
+        let fallbackItem = AVPlayerItem(url: playback.videoURL)
+        fallbackItem.forwardPlaybackEndTime = CMTime(
+            seconds: playback.clipStartSecond + playback.clipDurationSeconds,
+            preferredTimescale: 600
         )
+        let player = AVPlayer(playerItem: fallbackItem)
+        player.actionAtItemEnd = .pause
+        player.seek(to: CMTime(seconds: playback.clipStartSecond, preferredTimescale: 600))
+        return player
+    }
+    
+    private var mistakeExplanation: String {
+        let reason = playback.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let context = playback.subtitle?.lowercased() ?? ""
+
+        if reason.contains("feet too close") {
+            if context.contains("wall-sit") {
+                return "Your feet are too close to the wall here, which makes the sitting angle and weight distribution less stable. Step your feet slightly farther away and keep your back supported against the wall."
+            }
+            return "Your stance is too narrow here. Move your feet slightly wider so you have a more stable base and better leg alignment."
+        }
+
+        if reason.contains("knees in") || reason.contains("knee in") {
+            return "Your knees are collapsing inward here. Push them out in line with your toes and keep your weight balanced on both sides."
+        }
+
+        if reason.contains("round back") {
+            return "Your back is rounding too much here. Brace your core, keep your chest open, and maintain a more neutral spine throughout the movement."
+        }
+
+        if reason.contains("torso lean forward") {
+            return "Your torso is leaning too far forward here. Lift your chest, brace your core, and keep your weight more centered over your feet."
+        }
+
+        if reason.contains("knee over toe") {
+            return "Your knee is moving too far past your toes here. Send your hips back more and avoid driving your shin too far forward."
+        }
+
+        if reason.contains("not deep enough") {
+            return "You are not going deep enough here. Lower your hips a bit more while keeping your chest up and your knees steady."
+        }
+
+        if reason.contains("stand too narrow") {
+            return "Your setup stance is too narrow here. Move your feet slightly wider to create a more stable base."
+        }
+
+        if reason.contains("stand too wide") {
+            return "Your setup stance is too wide here. Bring your feet in a little so the position is easier to control."
+        }
+
+        if reason.contains("hips too high") {
+            return "Your hips are too high here. Lower them slightly so your body stays in a straighter line."
+        }
+
+        if reason.contains("low hips") || reason.contains("hips too low") {
+            return "Your hips are dropping too low here. Tighten your core and lift them slightly so your body stays straighter."
+        }
+
+        if reason.contains("head too low") {
+            return "Your head is too low here. Look slightly ahead on the floor and keep your neck aligned naturally with your torso."
+        }
+
+        if reason.contains("elbow") {
+            return "Your elbow position is unstable here. Stay active through your arms and place your elbows in a position you can control more comfortably."
+        }
+
+        return "Review this moment closely to see where your form starts to drift, then slow that part down and make it more controlled."
     }
 }

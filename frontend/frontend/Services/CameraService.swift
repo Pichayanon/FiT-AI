@@ -224,7 +224,7 @@ final class CameraService: NSObject, ObservableObject {
 
     private var ws: WebSocketService?
     private var lastSentTime: CFTimeInterval = 0
-    private let targetFPS: Double = 10
+    private let targetFPS: Double = 30
 
     override init() {
         super.init()

@@ -233,7 +233,7 @@ struct ErrorCount: Identifiable {
 /// A timestamped mistake event during a workout (optionally tied to a rep number).
 struct MistakeEvent: Identifiable {
     let id = UUID()
-    let atSecond: Int
+    let atSecond: Double
     let reason: String
     let repNumber: Int?
 }
@@ -292,7 +292,7 @@ struct ErrorCountRecord: Codable {
 
 /// Codable mistake event record for Firestore serialization.
 struct MistakeEventRecord: Codable {
-    let atSecond: Int
+    let atSecond: Double
     let reason: String
     let repNumber: Int?
 }
@@ -357,7 +357,7 @@ extension ExerciseRecord {
         let mistakes: [MistakeEventRecord] = (data["mistakes"] as? [[String: Any]])?
             .compactMap { m in
                 (m["reason"] as? String).flatMap { reason in
-                    (m["atSecond"] as? Int).map { at in
+                    ((m["atSecond"] as? Double) ?? (m["atSecond"] as? Int).map(Double.init)).map { at in
                         let repNumber = (m["repNumber"] as? Int) ?? (m["repNumber"] as? Double).map { Int($0) }
                         return MistakeEventRecord(atSecond: at, reason: reason, repNumber: repNumber)
                     }

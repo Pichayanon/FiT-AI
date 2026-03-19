@@ -46,31 +46,18 @@ struct WorkoutSessionView: View {
                 VStack {
                     TopHUD(
                         isSessionRunning: viewModel.isSessionRunning,
-                        setTitle: viewModel.titleForHUD
+                        backendState: viewModel.backendState,
+                        setTitle: viewModel.titleForHUD,
+                        feedback: viewModel.feedback
                     )
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 14)
                     .padding(.top, 8)
 
                     Spacer()
 
-                    // Massive Center Feedback Text
-                    if (viewModel.isSessionRunning || viewModel.isFinalizingSession) && !viewModel.feedback.isEmpty {
-                        Text(viewModel.feedback)
-                            .font(.system(size: 42, weight: .heavy, design: .rounded))
-                            .foregroundColor(.white)
-                            .multilineTextAlignment(.center)
-                            .lineLimit(3)
-                            .minimumScaleFactor(0.5)
-                            .shadow(color: .black.opacity(0.8), radius: 8, x: 0, y: 4)
-                            .padding(.horizontal, 24)
-                            .animation(.spring(), value: viewModel.feedback)
-                    }
-
-                    Spacer()
-
                     bottomPanel
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 16)
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 10)
                 }
 
                 if !viewModel.isSessionRunning && !viewModel.isFinalizingSession {
@@ -136,18 +123,15 @@ struct WorkoutSessionView: View {
             currentGuideOverlay
 
                 Text("Set camera to SIDE VIEW\nPress Start when ready")
-                    .font(.subheadline.weight(.bold))
-                .foregroundColor(.white)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 14)
-                .background(.ultraThinMaterial)
-                .environment(\.colorScheme, .dark)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 4)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .padding(.horizontal, 18)
-        .offset(y: -40)
     }
 
     // MARK: - Exercise Preview Overlay
@@ -164,26 +148,23 @@ struct WorkoutSessionView: View {
                 guideContent
 
                 Text(title)
-                    .font(.headline.weight(.bold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundColor(.white)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 14)
-                    .background(.ultraThinMaterial)
-                    .environment(\.colorScheme, .dark)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.45))
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 4)
             }
             .padding(.horizontal, 18)
-            .offset(y: -40)
         }
     }
 
     // MARK: - Bottom Panel
 
     private var bottomPanel: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
                 StatChip(title: "Total", value: viewModel.totalReps, tint: .white)
                 StatChip(title: "Correct", value: viewModel.correctReps, tint: .green)
                 StatChip(title: "Incorrect", value: viewModel.incorrectReps, tint: .red)
@@ -201,13 +182,12 @@ struct WorkoutSessionView: View {
                 }
             } label: {
                 Text(buttonTitle)
-                    .font(.headline.weight(.bold))
+                    .font(.headline)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
+                    .padding(.vertical, 14)
                     .foregroundColor(buttonForegroundColor)
-                    .background(buttonBackgroundColor.gradient)
+                    .background(buttonBackgroundColor)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .shadow(color: buttonShadowColor.opacity(0.3), radius: 10, x: 0, y: 5)
             }
             .disabled(viewModel.isFinalizingSession)
         }
@@ -276,22 +256,17 @@ struct WorkoutSessionView: View {
 
     private var buttonTitle: String {
         if viewModel.isFinalizingSession { return "Saving summary..." }
-        return viewModel.isSessionRunning ? "End Workout" : "Start Workout"
+        return viewModel.isSessionRunning ? "End Session" : "Start Session"
     }
 
     private var buttonForegroundColor: Color {
         if viewModel.isFinalizingSession { return .white }
-        return viewModel.isSessionRunning ? .white : .black
+        return .black
     }
 
     private var buttonBackgroundColor: Color {
         if viewModel.isFinalizingSession { return .gray }
-        return viewModel.isSessionRunning ? .red : .yellow
-    }
-
-    private var buttonShadowColor: Color {
-        if viewModel.isFinalizingSession { return .gray }
-        return viewModel.isSessionRunning ? .red : .yellow
+        return viewModel.isSessionRunning ? .red : .green
     }
 
     // MARK: - Guide Overlay Selection
@@ -328,21 +303,76 @@ struct WorkoutSessionView: View {
 /// Status bar at the top showing the set title.
 private struct TopHUD: View {
     let isSessionRunning: Bool
+    let backendState: String
     let setTitle: String
+    let feedback: String
 
     var body: some View {
-        HStack {
-            Spacer()
-            Text(setTitle)
-                .font(.subheadline.weight(.semibold))
-                .foregroundColor(.white)
-                .lineLimit(1)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(.ultraThinMaterial)
-                .environment(\.colorScheme, .dark)
-                .clipShape(Capsule())
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                pill(
+                    text: isSessionRunning ? "Streaming" : "Preview",
+                    dot: isSessionRunning ? .green : .gray
+                )
+                statePill(backendState)
+                Spacer()
+                Text(setTitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white.opacity(0.95))
+                    .lineLimit(1)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.black.opacity(0.30))
+                    .clipShape(Capsule())
+            }
+
+            HStack(spacing: 8) {
+                Text("Live")
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(.white.opacity(0.9))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.black.opacity(0.28))
+                    .clipShape(Capsule())
+
+                Text(feedback)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+
+                Spacer(minLength: 0)
+            }
         }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(Color.black.opacity(0.22))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func pill(text: String, dot: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(dot)
+                .frame(width: 8, height: 8)
+            Text(text)
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.white)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.black.opacity(0.32))
+        .clipShape(Capsule())
+    }
+
+    private func statePill(_ state: String) -> some View {
+        Text(state.uppercased())
+            .font(.caption2.weight(.bold))
+            .foregroundColor(.white.opacity(0.95))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(Color.black.opacity(0.28))
+            .clipShape(Capsule())
     }
 }
 
@@ -414,18 +444,17 @@ private struct StatChip: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.caption.weight(.medium))
+                .font(.caption2)
                 .foregroundColor(.white.opacity(0.7))
             Text("\(value)")
-                .font(.system(size: 26, weight: .bold, design: .rounded))
+                .font(.system(size: 22, weight: .bold, design: .rounded))
                 .monospacedDigit()
                 .foregroundColor(tint)
         }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.ultraThinMaterial)
-        .environment(\.colorScheme, .dark)
+        .background(Color.black.opacity(0.24))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
@@ -440,25 +469,24 @@ private struct ExerciseProgressCard: View {
     let progress: Double
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(title)
-                    .font(.subheadline.weight(.bold))
+                    .font(.caption.weight(.semibold))
                     .foregroundColor(.white)
                 Spacer()
                 Text(detail)
-                    .font(.subheadline.weight(.bold))
-                    .foregroundColor(.white.opacity(0.95))
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(.white.opacity(0.9))
                     .monospacedDigit()
             }
 
-            ProgressBarView(progress: progress, height: 12, fillColor: progress >= 1.0 ? .green : .yellow)
+            ProgressBarView(progress: progress, height: 10, fillColor: progress >= 1.0 ? .green : .white)
         }
-        .padding(.vertical, 14)
-        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.ultraThinMaterial)
-        .environment(\.colorScheme, .dark)
+        .background(Color.black.opacity(0.24))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }

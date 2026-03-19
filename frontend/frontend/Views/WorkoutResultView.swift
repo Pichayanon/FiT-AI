@@ -110,7 +110,7 @@ fileprivate struct StatPill: View {
 
 // MARK: - Summary Exercise Card
 
-/// Card displaying detailed stats for one exercise (reps/hold, errors, mistake timeline).
+/// Card displaying detailed stats for one exercise (reps/hold and mistake timeline).
 fileprivate struct SummaryExerciseCard: View {
     let item: ExerciseSummaryItem
     let videoURL: URL?
@@ -134,7 +134,7 @@ fileprivate struct SummaryExerciseCard: View {
             }
 
             switch item {
-            case .movement(_, let totalReps, let correctReps, let incorrectReps, let targetCorrectReps, let errors, let mistakes):
+            case .movement(_, let totalReps, let correctReps, let incorrectReps, let targetCorrectReps, _, let mistakes):
                 VStack(alignment: .leading, spacing: 8) {
                     ProgressBarView(
                         progress: targetCorrectReps > 0 ? Double(correctReps) / Double(targetCorrectReps) : 0,
@@ -151,7 +151,6 @@ fileprivate struct SummaryExerciseCard: View {
                             .font(.caption)
                             .foregroundColor(.gray)
                     }
-                    ErrorsBlock(errors: errors)
                     MistakesBlock(
                         exerciseName: item.displayName,
                         mistakes: mistakes,
@@ -160,7 +159,7 @@ fileprivate struct SummaryExerciseCard: View {
                     )
                 }
 
-            case .isometric(_, let durationSeconds, let targetSeconds, let errors, let mistakes):
+            case .isometric(_, let durationSeconds, let targetSeconds, _, let mistakes):
                 VStack(alignment: .leading, spacing: 8) {
                     ProgressBarView(
                         progress: targetSeconds > 0 ? durationSeconds / targetSeconds : 0,
@@ -172,7 +171,6 @@ fileprivate struct SummaryExerciseCard: View {
                         .font(.subheadline)
                         .fontWeight(.medium)
                         .foregroundColor(.white)
-                    ErrorsBlock(errors: errors)
                     MistakesBlock(
                         exerciseName: item.displayName,
                         mistakes: mistakes,
@@ -192,33 +190,6 @@ fileprivate struct SummaryExerciseCard: View {
     }
 }
 
-// MARK: - Errors Block
-
-/// Lists error reasons with their counts, or "None" if empty.
-fileprivate struct ErrorsBlock: View {
-    let errors: [ErrorCount]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("What went wrong")
-                .font(.caption)
-                .fontWeight(.medium)
-                .foregroundColor(.gray)
-            if errors.isEmpty {
-                Text("None")
-                    .font(.subheadline)
-                    .foregroundColor(.gray.opacity(0.7))
-            } else {
-                ForEach(errors) { e in
-                    Text("\u{2022} \(e.reason) -- \(e.count) times")
-                        .font(.subheadline)
-                        .foregroundColor(.orange.opacity(0.95))
-                }
-            }
-        }
-    }
-}
-
 // MARK: - Mistakes Block
 
 /// Lists timestamped mistake events, or a "no mistakes" message if empty.
@@ -230,7 +201,7 @@ fileprivate struct MistakesBlock: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Mistake timeline")
+            Text("What went wrong")
                 .font(.caption)
                 .fontWeight(.medium)
                 .foregroundColor(.gray)
@@ -249,7 +220,7 @@ fileprivate struct MistakesBlock: View {
                                     Text(mistakeTimelineText(event))
                                         .font(.subheadline)
                                         .foregroundColor(.orange.opacity(0.95))
-                                    Text("Tap to replay this mistake")
+                                    Text("Tap to play a short replay clip")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }
@@ -282,9 +253,9 @@ fileprivate struct MistakesBlock: View {
 
     private func mistakeTimelineText(_ event: MistakeEvent) -> String {
         if let rep = event.repNumber {
-            return "\u{2022} \(event.reason) -- Rep \(rep)"
+            return "Rep \(rep) - \(event.reason)"
         }
-        return "\u{2022} \(event.reason)"
+        return event.reason
     }
 
     private func makePlayback(for event: MistakeEvent, videoURL: URL) -> SessionMistakePlayback {

@@ -356,7 +356,7 @@ private struct HistoryExerciseCard: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Mistake timeline")
+                Text("What went wrong")
                     .font(.caption)
                     .fontWeight(.medium)
                     .foregroundColor(.gray)
@@ -375,7 +375,7 @@ private struct HistoryExerciseCard: View {
                                         Text(formatMistakeTimeline(event))
                                             .font(.subheadline)
                                             .foregroundColor(.orange.opacity(0.95))
-                                        Text("Tap to replay this mistake")
+                                        Text("Tap to play a short replay clip")
                                             .font(.caption)
                                             .foregroundColor(.gray)
                                     }
@@ -405,23 +405,6 @@ private struct HistoryExerciseCard: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("What went wrong")
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .foregroundColor(.gray)
-                if exercise.errors.isEmpty {
-                    Text("None")
-                        .font(.subheadline)
-                        .foregroundColor(.gray.opacity(0.7))
-                } else {
-                    ForEach(Array(exercise.errors.enumerated()), id: \.offset) { _, e in
-                        Text("\u{2022} \(e.reason) — \(e.count) times")
-                            .font(.subheadline)
-                            .foregroundColor(.orange.opacity(0.95))
-                    }
-                }
-            }
         }
         .padding(16)
         .background(Color.white.opacity(0.06))
@@ -430,9 +413,9 @@ private struct HistoryExerciseCard: View {
 
     private func formatMistakeTimeline(_ event: MistakeEventRecord) -> String {
         if let rep = event.repNumber {
-            return "\u{2022} \(event.reason) — Rep \(rep)"
+            return "Rep \(rep) - \(event.reason)"
         }
-        return "\u{2022} \(event.reason)"
+        return event.reason
     }
 
     private func makePlayback(for event: MistakeEventRecord, videoURL: URL) -> SessionMistakePlayback {
