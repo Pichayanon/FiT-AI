@@ -27,6 +27,7 @@ from shared.side_gate import SideGate
 from shared.status_sender import StatusSender
 
 from .feature_extractor import PlankFeatureExtractor
+from .features import is_plank_ready_pose
 from .stream_state import StreamState
 
 
@@ -56,6 +57,9 @@ class PlankWebSocketSession(BaseWebSocketSession):
         no_pose_adjust_seconds: float,
         dark_adjust_seconds: float,
         dark_brightness_th: float,
+        plank_ready_max_body_axis_angle_deg: float,
+        plank_ready_max_torso_angle_deg: float,
+        plank_ready_max_leg_angle_deg: float,
         phase_no_pose: str,
         phase_have_pose: str,
         phase_buffering: str,
@@ -79,6 +83,11 @@ class PlankWebSocketSession(BaseWebSocketSession):
         self.no_pose_adjust_seconds = no_pose_adjust_seconds
         self.dark_adjust_seconds = dark_adjust_seconds
         self.dark_brightness_th = dark_brightness_th
+        self.plank_ready_max_body_axis_angle_deg = (
+            plank_ready_max_body_axis_angle_deg
+        )
+        self.plank_ready_max_torso_angle_deg = plank_ready_max_torso_angle_deg
+        self.plank_ready_max_leg_angle_deg = plank_ready_max_leg_angle_deg
         self.phase_no_pose = phase_no_pose
         self.phase_have_pose = phase_have_pose
         self.phase_buffering = phase_buffering
@@ -158,6 +167,38 @@ class PlankWebSocketSession(BaseWebSocketSession):
             self.st.dark_since = None
             self.st.dark_alerted = False
 
+    async def _update_dark_watchdog(
+        self,
+        too_dark: bool,
+        brightness_mean: float,
+    ) -> None:
+        """Send a light warning once darkness persists beyond the threshold."""
+        now = time.time()
+
+        if not too_dark:
+            self.st.dark_since = None
+            self.st.dark_alerted = False
+            return
+
+        if self.st.dark_since is None:
+            self.st.dark_since = now
+            self.st.dark_alerted = False
+            return
+
+        if self.st.dark_alerted:
+            return
+
+        if now - self.st.dark_since >= self.dark_adjust_seconds:
+            await self.status.send_info(
+                self.ws,
+                "Please adjust your lights.",
+                {
+                    "brightness_mean": round(brightness_mean, 1),
+                    "brightness_th": self.dark_brightness_th,
+                },
+            )
+            self.st.dark_alerted = True
+
     # ---------------------------------------------------------------
     # Frame handler
     # ---------------------------------------------------------------
@@ -180,6 +221,7 @@ class PlankWebSocketSession(BaseWebSocketSession):
             frame,
             self.dark_brightness_th,
         )
+        await self._update_dark_watchdog(too_dark, brightness_mean)
 
         # Step 3: Run pose detection
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -188,6 +230,8 @@ class PlankWebSocketSession(BaseWebSocketSession):
         # Step 4: Side-view gate
         side_debug: Dict[str, Any] = {}
         chosen_side: Optional[str] = None
+        plank_pose_ok = False
+        posture_debug: Dict[str, Any] = {}
 
         if pose_result.pose_landmarks:
             landmarks = pose_result.pose_landmarks.landmark
@@ -195,6 +239,15 @@ class PlankWebSocketSession(BaseWebSocketSession):
                 chosen_side = self.st.chosen_side
             else:
                 chosen_side, side_debug = self.gate.choose_best_side(landmarks)
+
+            if chosen_side is not None:
+                plank_pose_ok, posture_debug = is_plank_ready_pose(
+                    landmarks,
+                    chosen_side,
+                    max_body_axis_angle_deg=self.plank_ready_max_body_axis_angle_deg,
+                    max_torso_angle_deg=self.plank_ready_max_torso_angle_deg,
+                    max_leg_angle_deg=self.plank_ready_max_leg_angle_deg,
+                )
 
         # Gate failure: NO_POSE watchdog + DARK watchdog
         if (not pose_result.pose_landmarks) or (chosen_side is None):
@@ -204,8 +257,24 @@ class PlankWebSocketSession(BaseWebSocketSession):
         # Pose regained: reset watchdogs
         self.st.no_pose_since = None
         self.st.no_pose_alerted = False
-        self.st.dark_since = None
-        self.st.dark_alerted = False
+
+        # Step 5: Plank posture gate — avoid predicting while still upright
+        if not plank_pose_ok:
+            self._reset_gate_and_buffers(reset_watchdog=False)
+            await self.status.send_status(
+                self.ws,
+                self.st,
+                self.phase_have_pose,
+                {
+                    "chosen_side": chosen_side,
+                    "ready_streak": 0,
+                    "needed_streak": self.ready_streak_n,
+                    "window_fill": 0,
+                    "window_size": self.window_frames,
+                    **posture_debug,
+                },
+            )
+            return
 
         # Step 5: Track ready streak
         self.st.ready_streak += 1
@@ -370,32 +439,6 @@ class PlankWebSocketSession(BaseWebSocketSession):
         if self.st.no_pose_since is None:
             self.st.no_pose_since = now
             self.st.no_pose_alerted = False
-
-        # Track DARK watchdog
-        if too_dark:
-            if self.st.dark_since is None:
-                self.st.dark_since = now
-                self.st.dark_alerted = False
-        else:
-            self.st.dark_since = None
-            self.st.dark_alerted = False
-
-        # DARK alert (takes priority over NO_POSE)
-        if (
-            too_dark
-            and (self.st.dark_since is not None)
-            and (not self.st.dark_alerted)
-            and (now - self.st.dark_since >= self.dark_adjust_seconds)
-        ):
-            await self.status.send_info(
-                self.ws,
-                "Please adjust your lights.",
-                {
-                    "brightness_mean": round(brightness_mean, 1),
-                    "brightness_th": self.dark_brightness_th,
-                },
-            )
-            self.st.dark_alerted = True
 
         # NO_POSE alert (only if not explained by darkness)
         if (

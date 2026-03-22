@@ -37,16 +37,6 @@ RIGHT_HEEL_INDEX = 30
 LEFT_FOOT_INDEX = 31
 RIGHT_FOOT_INDEX = 32
 
-# Backward-compatible aliases used by other lunge modules.
-L_EAR, R_EAR = LEFT_EAR_INDEX, RIGHT_EAR_INDEX
-L_SHO, R_SHO = LEFT_SHOULDER_INDEX, RIGHT_SHOULDER_INDEX
-L_HIP, R_HIP = LEFT_HIP_INDEX, RIGHT_HIP_INDEX
-L_KNE, R_KNE = LEFT_KNEE_INDEX, RIGHT_KNEE_INDEX
-L_ANK, R_ANK = LEFT_ANKLE_INDEX, RIGHT_ANKLE_INDEX
-L_HEEL, R_HEEL = LEFT_HEEL_INDEX, RIGHT_HEEL_INDEX
-L_FOOT, R_FOOT = LEFT_FOOT_INDEX, RIGHT_FOOT_INDEX
-
-
 # ---------------------------------------------------------------
 # Shared landmark parsing
 # ---------------------------------------------------------------

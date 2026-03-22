@@ -12,6 +12,8 @@ struct WorkoutSessionView: View {
     @Environment(\.dismiss) private var dismiss
 
     @StateObject private var viewModel: WorkoutSessionViewModel
+    @State private var shouldDismissParentOnDisappear = false
+    private let onBackToHome: (() -> Void)?
 
     /// Wall-sit hold timer (0.1s interval for smooth progress bar updates).
     private let wallSitTick = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
@@ -22,8 +24,9 @@ struct WorkoutSessionView: View {
     /// Plank hold timer (0.1s interval).
     private let plankTick = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
 
-    init(setTitle: String) {
+    init(setTitle: String, onBackToHome: (() -> Void)? = nil) {
         self.setTitle = setTitle
+        self.onBackToHome = onBackToHome
         _viewModel = StateObject(wrappedValue: WorkoutSessionViewModel(setTitle: setTitle))
     }
 
@@ -60,8 +63,19 @@ struct WorkoutSessionView: View {
                         .padding(.bottom, 10)
                 }
 
-                if !viewModel.isSessionRunning && !viewModel.isFinalizingSession {
-                    guideCenterOverlay
+                if viewModel.showExerciseIntroOverlay {
+                    exercisePreviewOverlay(
+                        title: "\(viewModel.mode.displayName)\nListen and get in position",
+                        guideContent: currentGuideOverlay
+                    )
+                    .transition(.opacity)
+                }
+
+                if let guidanceText = viewModel.sessionGuidanceOverlayText,
+                   !viewModel.showExerciseIntroOverlay,
+                   !viewModel.showSquatPreview,
+                   !viewModel.showPlankPreview {
+                    sessionGuidanceOverlay(text: guidanceText)
                         .transition(.opacity)
                 }
 
@@ -90,6 +104,7 @@ struct WorkoutSessionView: View {
             .navigationBarBackButtonHidden(true)
             .navigationDestination(isPresented: $viewModel.navigateToResult) {
                 WorkoutResultView(summary: viewModel.sessionSummary) {
+                    shouldDismissParentOnDisappear = true
                     dismiss()
                 }
                     .navigationBarBackButtonHidden(true)
@@ -101,6 +116,10 @@ struct WorkoutSessionView: View {
         }
         .onDisappear {
             viewModel.onDisappear()
+            if shouldDismissParentOnDisappear {
+                shouldDismissParentOnDisappear = false
+                onBackToHome?()
+            }
         }
         .onChange(of: viewModel.feedback) { oldValue, newValue in
             viewModel.handleFeedbackChange()
@@ -110,28 +129,11 @@ struct WorkoutSessionView: View {
         }
         .onReceive(squatIdleTick) { _ in
             viewModel.handleSquatIdleTick()
+            viewModel.handleLungesSetupTick()
         }
         .onReceive(plankTick) { _ in
             viewModel.handlePlankTick()
         }
-    }
-
-    // MARK: - Center Guide (shown before session starts)
-
-    private var guideCenterOverlay: some View {
-        VStack(spacing: 12) {
-            currentGuideOverlay
-
-                Text("Set camera to SIDE VIEW\nPress Start when ready")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .background(Color.black.opacity(0.45))
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .padding(.horizontal, 18)
     }
 
     // MARK: - Exercise Preview Overlay
@@ -158,6 +160,48 @@ struct WorkoutSessionView: View {
             }
             .padding(.horizontal, 18)
         }
+        .allowsHitTesting(false)
+    }
+
+    private func sessionGuidanceOverlay(text: String) -> some View {
+        let normalizedText = text.lowercased()
+        let detailText: String
+        if normalizedText.contains("lights") {
+            detailText = "Brighten the room or face a light source"
+        } else if normalizedText.contains("plank position") {
+            detailText = "Get low and keep your body straight"
+        } else if normalizedText.contains("from the front") {
+            detailText = "Face the camera and keep your full body in frame"
+        } else if normalizedText.contains("from the side") {
+            detailText = "Turn sideways and keep your full body in frame"
+        } else {
+            detailText = "Keep your whole body visible in the frame"
+        }
+
+        return ZStack {
+            Color.black.opacity(0.28).ignoresSafeArea()
+
+            VStack(spacing: 10) {
+                Text(text)
+                    .font(.headline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    .background(Color.black.opacity(0.62))
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                Text(detailText)
+                    .font(.caption.weight(.medium))
+                    .foregroundColor(.white.opacity(0.9))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.40))
+                    .clipShape(Capsule())
+            }
+            .padding(.horizontal, 24)
+        }
+        .allowsHitTesting(false)
     }
 
     // MARK: - Bottom Panel
@@ -291,7 +335,7 @@ struct WorkoutSessionView: View {
             )
         case .lunges:
             ExerciseGuideOverlay(
-                frames: ["squat_01", "squat_02"],
+                frames: ["lunges_01", "lunges_02", "lunges_03"],
                 label: "Step forward -> Lower -> Push back"
             )
         }
@@ -320,6 +364,9 @@ private struct TopHUD: View {
                     .font(.caption.weight(.semibold))
                     .foregroundColor(.white.opacity(0.95))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .allowsTightening(true)
+                    .layoutPriority(1)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .background(Color.black.opacity(0.30))

@@ -30,17 +30,11 @@ if __package__ in {None, ""}:
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-import json
 import os
 import time
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict
 
-import numpy as np
-import cv2
 import mediapipe as mp
-import torch
 
 from fastapi import FastAPI, WebSocket
 
@@ -55,8 +49,6 @@ from squat.features import (
 from squat.session import (
     SquatModelService,
     SquatWebSocketSession,
-    StreamState,
-    update_rep_counter,
 )
 
 
@@ -72,6 +64,7 @@ PHASE_MODEL_PATH = os.path.join(_DIR, "models", "squat_phase_tcn.pt")
 PRE_FRAMES = 5
 POST_FRAMES = 5
 MIN_GAP = 18  # min frames between bottom events
+PHASE_DECISION_MODE = "last_logits"  # "last_logits" | "majority_vote"
 
 # Stand gate thresholds
 STAND_KNEE_ANGLE_DEG_TH = 160.0
@@ -91,6 +84,8 @@ MP_MIN_TRACK_CONF = 0.80
 STATUS_SEND_EVERY_N_FRAMES = 3
 PHASE_SEND_EVERY_N_FRAMES = 2
 
+DARK_ADJUST_SECONDS = 3.0
+DARK_BRIGHTNESS_TH = 55.0
 
 STAND_MIN_STREAK = 6
 STAND_PRED_COOLDOWN = 12
@@ -136,12 +131,15 @@ def health() -> Dict[str, Any]:
         "bottom_loaded": model_service.bottom_loaded,
         "stand_loaded": model_service.stand_loaded,
         "phase_loaded": model_service.phase_loaded,
+        "phase_decision_mode": PHASE_DECISION_MODE,
         "bottom_in_dim": model_service.bottom_in_dim,
         "stand_in_dim": model_service.stand_in_dim,
         "stand_ok_labels": list(STAND_OK_LABELS),
         "front_vis_th": FRONT_VIS_TH,
         "front_min_sho_gap": FRONT_MIN_SHOULDER_X_GAP,
         "front_min_hip_gap": FRONT_MIN_HIP_X_GAP,
+        "dark_adjust_seconds": DARK_ADJUST_SECONDS,
+        "dark_brightness_th": DARK_BRIGHTNESS_TH,
         "timestamp": int(time.time()),
     }
 
@@ -168,10 +166,13 @@ async def ws_video(websocket: WebSocket) -> None:
         pre_frames=PRE_FRAMES,
         post_frames=POST_FRAMES,
         min_gap=MIN_GAP,
+        phase_decision_mode=PHASE_DECISION_MODE,
         stand_knee_angle_deg_th=STAND_KNEE_ANGLE_DEG_TH,
         stand_knee_delta_max_deg=STAND_KNEE_DELTA_MAX_DEG,
         stand_min_streak=STAND_MIN_STREAK,
         stand_pred_cooldown=STAND_PRED_COOLDOWN,
+        dark_adjust_seconds=DARK_ADJUST_SECONDS,
+        dark_brightness_th=DARK_BRIGHTNESS_TH,
         goal_good_reps=GOAL_GOOD_REPS,
         mp_min_det_conf=MP_MIN_DET_CONF,
         mp_min_track_conf=MP_MIN_TRACK_CONF,
@@ -184,4 +185,4 @@ async def ws_video(websocket: WebSocket) -> None:
 # ---------------------------------------------------------------
 
 if __name__ == "__main__":
-    serve("squat.squat_streaming:app", port=5051)
+    serve(app, port=5051)

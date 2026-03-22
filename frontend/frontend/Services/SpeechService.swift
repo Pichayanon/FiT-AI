@@ -8,10 +8,26 @@ import AVFoundation
 /// - Throttles speech to prevent rapid-fire announcements.
 /// - Deduplicates consecutive identical messages.
 /// - Filters out non-actionable status messages (e.g., "correct", "hold", "streaming").
-final class SpeechService: ObservableObject {
+final class SpeechService: NSObject, ObservableObject, @unchecked Sendable {
+    enum DeliveryMode {
+        case dropIfBusy
+        case enqueue
+        case interrupt
+    }
+
     private let speaker = AVSpeechSynthesizer()
     private var lastSpoken: String = ""
     private var lastSpokenAt: Date = .distantPast
+    private var completionHandlers: [ObjectIdentifier: () -> Void] = [:]
+
+    override init() {
+        super.init()
+        speaker.delegate = self
+    }
+
+    var isSpeaking: Bool {
+        speaker.isSpeaking || speaker.isPaused
+    }
 
     /// Configures the audio session for spoken audio playback (works even in silent mode).
     func configureAudioSession() {
@@ -90,11 +106,15 @@ final class SpeechService: ObservableObject {
     ///   - language: BCP 47 language code (default: "en-US").
     ///   - minInterval: Minimum seconds between consecutive speech events.
     ///   - allowRepeat: If false, prevents speaking the same text twice in a row.
+    ///   - deliveryMode: Whether to drop, queue, or interrupt while another utterance is active.
+    ///   - completion: Called when this utterance finishes or is cancelled.
     func speak(
         _ text: String,
         language: String = "en-US",
         minInterval: TimeInterval = 1.2,
-        allowRepeat: Bool = false
+        allowRepeat: Bool = false,
+        deliveryMode: DeliveryMode = .dropIfBusy,
+        completion: (() -> Void)? = nil
     ) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
@@ -102,9 +122,18 @@ final class SpeechService: ObservableObject {
         // Prevent speaking identical text consecutively unless explicitly allowed
         if !allowRepeat, clean == lastSpoken { return }
 
+        if deliveryMode == .dropIfBusy, isSpeaking {
+            return
+        }
+
         // Enforce minimum interval between speech events
         let now = Date()
         if minInterval > 0, now.timeIntervalSince(lastSpokenAt) < minInterval { return }
+
+        if deliveryMode == .interrupt {
+            completionHandlers.removeAll()
+            speaker.stopSpeaking(at: .immediate)
+        }
 
         lastSpoken = clean
         lastSpokenAt = now
@@ -115,12 +144,35 @@ final class SpeechService: ObservableObject {
         u.pitchMultiplier = 1.0
         u.volume = 1.0
 
-        speaker.stopSpeaking(at: .immediate)
+        if let completion {
+            completionHandlers[ObjectIdentifier(u)] = completion
+        }
+
         speaker.speak(u)
     }
 
     /// Immediately stops any in-progress speech.
     func stop() {
+        completionHandlers.removeAll()
         speaker.stopSpeaking(at: .immediate)
+    }
+
+    private func runCompletion(for utterance: AVSpeechUtterance) {
+        let key = ObjectIdentifier(utterance)
+        guard let completion = completionHandlers.removeValue(forKey: key) else { return }
+
+        DispatchQueue.main.async {
+            completion()
+        }
+    }
+}
+
+extension SpeechService: AVSpeechSynthesizerDelegate {
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        runCompletion(for: utterance)
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        runCompletion(for: utterance)
     }
 }

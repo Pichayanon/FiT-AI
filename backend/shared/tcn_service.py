@@ -7,6 +7,7 @@ used by squat and lunges streaming backends.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -18,18 +19,37 @@ from .video_utils import resample_time
 
 def _get_simple_tcn_config(
     checkpoint: Dict[str, Any],
-) -> Tuple[Tuple[int, ...], float]:
+) -> Tuple[Tuple[int, ...], float, bool]:
     """Extract SimpleTCN architecture config from checkpoint metadata."""
     metadata = checkpoint.get("meta", {})
+    state_dict = checkpoint.get("model_state") or checkpoint.get("state_dict") or {}
 
-    channels_raw = metadata.get("channels", (128, 128, 128))
+    channels_raw = metadata.get("channels")
     if isinstance(channels_raw, (list, tuple)) and channels_raw:
         channels = tuple(int(ch) for ch in channels_raw)
     else:
-        channels = (128, 128, 128)
+        inferred_channels = []
+        indexed_channels = []
+        for key, value in state_dict.items():
+            match = re.fullmatch(r"tcn\.(\d+)\.conv1\.weight", key)
+            if match:
+                indexed_channels.append((int(match.group(1)), int(value.shape[0])))
+        if indexed_channels:
+            channels = tuple(ch for _, ch in sorted(indexed_channels))
+        elif "fc.weight" in state_dict and hasattr(state_dict["fc.weight"], "shape"):
+            inferred_channels = [int(state_dict["fc.weight"].shape[1])]
+            channels = tuple(inferred_channels)
+        else:
+            channels = (64, 64, 64)
 
     dropout = float(metadata.get("dropout", 0.1))
-    return channels, dropout
+    use_attention_meta = metadata.get("use_attention")
+    if isinstance(use_attention_meta, bool):
+        use_attention = use_attention_meta
+    else:
+        use_attention = "attention.weight" in state_dict or "attention.bias" in state_dict
+
+    return channels, dropout, use_attention
 
 
 def load_tcn(path: str) -> Tuple[
@@ -55,18 +75,20 @@ def load_tcn(path: str) -> Tuple[
         target_window_size = int(checkpoint["T"])
         label_map = checkpoint["label_map"]
         inverse_label_map = {value: key for key, value in label_map.items()}
-        channels, dropout = _get_simple_tcn_config(checkpoint)
+        channels, dropout, use_attention = _get_simple_tcn_config(checkpoint)
         model = SimpleTCN(
             in_dim=in_dim,
             num_classes=len(inverse_label_map),
             channels=channels,
             dropout=dropout,
+            use_attention=use_attention,
         )
         model.load_state_dict(checkpoint["model_state"])
         model.eval()
         print(
             f"[MODEL] Loaded: {path} in_dim={in_dim} T={target_window_size} "
-            f"classes={inverse_label_map} channels={channels}"
+            f"classes={inverse_label_map} channels={channels} "
+            f"use_attention={use_attention}"
         )
         return model, target_window_size, inverse_label_map, in_dim
     except Exception as e:  # pylint: disable=broad-except

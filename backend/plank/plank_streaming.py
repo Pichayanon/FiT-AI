@@ -93,9 +93,14 @@ PHASE_INFERENCING = "INFERENCING"
 NO_POSE_ADJUST_SECONDS = 5.0
 
 # DARK watchdog: alert after this many seconds of dark frames
-DARK_ADJUST_SECONDS = 5.0
+DARK_ADJUST_SECONDS = 3.0
 # Mean grayscale brightness threshold (0..255)
 DARK_BRIGHTNESS_TH = 55.0
+
+# Plank-ready posture gate: keep inference off until the body is horizontal enough
+PLANK_READY_MAX_BODY_AXIS_ANGLE_DEG = 35.0
+PLANK_READY_MAX_TORSO_ANGLE_DEG = 45.0
+PLANK_READY_MAX_LEG_ANGLE_DEG = 45.0
 
 
 # ---------------------------------------------------------------
@@ -140,6 +145,9 @@ def health() -> Dict[str, Any]:
         "no_pose_adjust_seconds": NO_POSE_ADJUST_SECONDS,
         "dark_adjust_seconds": DARK_ADJUST_SECONDS,
         "dark_brightness_th": DARK_BRIGHTNESS_TH,
+        "plank_ready_max_body_axis_angle_deg": PLANK_READY_MAX_BODY_AXIS_ANGLE_DEG,
+        "plank_ready_max_torso_angle_deg": PLANK_READY_MAX_TORSO_ANGLE_DEG,
+        "plank_ready_max_leg_angle_deg": PLANK_READY_MAX_LEG_ANGLE_DEG,
     }
 
 
@@ -163,6 +171,9 @@ async def ws_video(websocket: WebSocket) -> None:
         no_pose_adjust_seconds=NO_POSE_ADJUST_SECONDS,
         dark_adjust_seconds=DARK_ADJUST_SECONDS,
         dark_brightness_th=DARK_BRIGHTNESS_TH,
+        plank_ready_max_body_axis_angle_deg=PLANK_READY_MAX_BODY_AXIS_ANGLE_DEG,
+        plank_ready_max_torso_angle_deg=PLANK_READY_MAX_TORSO_ANGLE_DEG,
+        plank_ready_max_leg_angle_deg=PLANK_READY_MAX_LEG_ANGLE_DEG,
         phase_no_pose=PHASE_NO_POSE,
         phase_have_pose=PHASE_HAVE_POSE,
         phase_buffering=PHASE_BUFFERING,
@@ -177,4 +188,4 @@ async def ws_video(websocket: WebSocket) -> None:
 # ---------------------------------------------------------------
 
 if __name__ == "__main__":
-    serve("plank.plank_streaming:app", port=5052)
+    serve(app, port=5052)

@@ -6,20 +6,26 @@ appeared in every exercise streaming module's `main()` function.
 
 Usage:
     from shared.server_utils import serve
+    from mymodule import app
 
     if __name__ == "__main__":
-        serve("squat.squat_streaming:app", port=5051)
+        serve(app, port=5051)
 """
 
 from __future__ import annotations
 
+from typing import Any
 
-def serve(module: str, port: int) -> None:
-    """Start a uvicorn server for the given FastAPI module.
+
+def serve(app: Any, port: int) -> None:
+    """Start a uvicorn server for the given FastAPI app object.
+
+    Accepts the app instance directly (not a string) to avoid uvicorn
+    re-importing the module and loading models twice.
 
     Args:
-        module: Dotted module path and app variable, e.g. "squat.squat_streaming:app".
-        port:   Port to listen on.
+        app:  FastAPI application instance.
+        port: Port to listen on.
     """
     import uvicorn
-    uvicorn.run(module, host="0.0.0.0", port=port, reload=False, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False, log_level="info")

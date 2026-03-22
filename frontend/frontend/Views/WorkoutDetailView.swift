@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Workout detail/preview screen showing the exercise list and a Start Workout button.
 struct WorkoutDetailView: View {
+    @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel: WorkoutDetailViewModel
 
     init(setTitle: String) {
@@ -34,7 +35,12 @@ struct WorkoutDetailView: View {
             
             Spacer()
             
-            NavigationLink(destination: WorkoutSessionView(setTitle: viewModel.setTitle)) {
+            NavigationLink(
+                destination: WorkoutSessionView(
+                    setTitle: viewModel.setTitle,
+                    onBackToHome: { dismiss() }
+                )
+            ) {
                 Text("Start Workout")
                     .frame(maxWidth: .infinity)
                     .padding()

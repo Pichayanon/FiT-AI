@@ -111,6 +111,8 @@ class BaseWebSocketSession:
 
     async def _handle_start(self) -> None:
         """Handle {"type": "start"} message. Reset state for a new session."""
+        if getattr(self, "st", None) is not None and getattr(self.st, "started", False):
+            await self._on_stop()
         self.st = self._create_state()
         self.st.started = True
         self.st.session_id = str(int(time.time() * 1000))
@@ -183,10 +185,18 @@ class BaseWebSocketSession:
 
         except WebSocketDisconnect:
             print(f"[WS] disconnect session_id={self.st.session_id}")
+            try:
+                await self._on_stop()
+            except Exception:  # pylint: disable=broad-except
+                pass
 
         except Exception as e:  # pylint: disable=broad-except
             print(f"[WS] error: {e}")
             print(traceback.format_exc())
+            try:
+                await self._on_stop()
+            except Exception:  # pylint: disable=broad-except
+                pass
             try:
                 await self.status.send_info(self.ws, f"Server error: {e}")
             except Exception:  # pylint: disable=broad-except

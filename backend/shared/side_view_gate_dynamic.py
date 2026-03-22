@@ -51,6 +51,18 @@ class SideViewGateDynamic:
             mp_pose.PoseLandmark.LEFT_SHOULDER,
             mp_pose.PoseLandmark.RIGHT_SHOULDER,
         ]
+        self.SIDE_LEG_CHAINS: Dict[str, List[int]] = {
+            "left": [
+                mp_pose.PoseLandmark.LEFT_HIP,
+                mp_pose.PoseLandmark.LEFT_KNEE,
+                mp_pose.PoseLandmark.LEFT_ANKLE,
+            ],
+            "right": [
+                mp_pose.PoseLandmark.RIGHT_HIP,
+                mp_pose.PoseLandmark.RIGHT_KNEE,
+                mp_pose.PoseLandmark.RIGHT_ANKLE,
+            ],
+        }
 
         self.LM_LABELS: Dict[int, str] = {
             mp_pose.PoseLandmark.LEFT_HIP: "L_HIP",
@@ -101,8 +113,23 @@ class SideViewGateDynamic:
             if v >= self.vis_th:
                 sho_ok = True
 
+        left_chain_ok = True
+        right_chain_ok = True
+        for idx in self.SIDE_LEG_CHAINS["left"]:
+            v = float(lm[idx, 3]) if is_np else float(lm[idx].visibility)
+            if v < self.vis_th:
+                left_chain_ok = False
+        for idx in self.SIDE_LEG_CHAINS["right"]:
+            v = float(lm[idx, 3]) if is_np else float(lm[idx].visibility)
+            if v < self.vis_th:
+                right_chain_ok = False
+
+        single_side_profile_ok = sho_ok and (left_chain_ok or right_chain_ok)
+
         if not sho_ok and not fail_reason:
             fail_reason = "Upper body not visible"
+        elif not legs_ok and single_side_profile_ok:
+            fail_reason = "Single side profile visible"
 
         ok = legs_ok and sho_ok
 
@@ -110,6 +137,9 @@ class SideViewGateDynamic:
             "vis_ok": ok,
             "legs_ok": legs_ok,
             "sho_ok": sho_ok,
+            "left_chain_ok": left_chain_ok,
+            "right_chain_ok": right_chain_ok,
+            "single_side_profile_ok": single_side_profile_ok,
             "vis_th": float(self.vis_th),
             "vis": vis_map,
         }

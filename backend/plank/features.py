@@ -6,7 +6,7 @@ consistent across offline and realtime paths.
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -21,11 +21,114 @@ LEFT_ANKLE_INDEX = 27
 RIGHT_ANKLE_INDEX = 28
 
 
+def _side_indices(side: str) -> Tuple[int, int, int]:
+    """Return shoulder/hip/ankle landmark indices for the chosen side."""
+    if side == "right":
+        return RIGHT_SHOULDER_INDEX, RIGHT_HIP_INDEX, RIGHT_ANKLE_INDEX
+    return LEFT_SHOULDER_INDEX, LEFT_HIP_INDEX, LEFT_ANKLE_INDEX
+
+
+def _angle_from_horizontal_deg(a_xy: np.ndarray, b_xy: np.ndarray) -> float:
+    """Return the segment angle relative to horizontal in the range [0, 90]."""
+    delta = np.asarray(b_xy, dtype=np.float32) - np.asarray(a_xy, dtype=np.float32)
+    angle_deg = abs(float(np.degrees(np.arctan2(delta[1], delta[0]))))
+    if angle_deg > 90.0:
+        angle_deg = 180.0 - angle_deg
+    return angle_deg
+
+
 def choose_visible_side(lm: list) -> str:
     """Select the body side with the more visible hip landmark."""
     right_hip_visibility = lm[RIGHT_HIP_INDEX].visibility
     left_hip_visibility = lm[LEFT_HIP_INDEX].visibility
     return "right" if right_hip_visibility > left_hip_visibility else "left"
+
+
+def extract_posture_metrics(lm: list, side: str) -> Dict[str, float]:
+    """Extract orientation metrics used to gate plank-ready posture.
+
+    The model features are intentionally translation/scale normalized, which makes
+    them poor at separating an upright body from a horizontal plank. These metrics
+    preserve image-space orientation so realtime inference only runs once the body
+    is sufficiently horizontal.
+    """
+    landmark_xyz = get_xyz(lm)
+    shoulder_index, hip_index, ankle_index = _side_indices(side)
+
+    selected_shoulder = landmark_xyz[shoulder_index]
+    selected_hip = landmark_xyz[hip_index]
+    selected_ankle = landmark_xyz[ankle_index]
+
+    torso_angle = _angle_from_horizontal_deg(
+        selected_shoulder[:2],
+        selected_hip[:2],
+    )
+    leg_angle = _angle_from_horizontal_deg(
+        selected_hip[:2],
+        selected_ankle[:2],
+    )
+    body_axis_angle = _angle_from_horizontal_deg(
+        selected_shoulder[:2],
+        selected_ankle[:2],
+    )
+    torso_dx = abs(float(selected_shoulder[0] - selected_hip[0]))
+    torso_dy = abs(float(selected_shoulder[1] - selected_hip[1]))
+    leg_dx = abs(float(selected_ankle[0] - selected_hip[0]))
+    leg_dy = abs(float(selected_ankle[1] - selected_hip[1]))
+    body_x_span = float(
+        max(selected_shoulder[0], selected_hip[0], selected_ankle[0])
+        - min(selected_shoulder[0], selected_hip[0], selected_ankle[0])
+    )
+    body_y_span = float(
+        max(selected_shoulder[1], selected_hip[1], selected_ankle[1])
+        - min(selected_shoulder[1], selected_hip[1], selected_ankle[1])
+    )
+
+    return {
+        "torso_angle_deg": float(torso_angle),
+        "leg_angle_deg": float(leg_angle),
+        "body_axis_angle_deg": float(body_axis_angle),
+        "torso_horizontal_ratio": torso_dx / (torso_dy + 1e-6),
+        "leg_horizontal_ratio": leg_dx / (leg_dy + 1e-6),
+        "body_horizontal_ratio": body_x_span / (body_y_span + 1e-6),
+        "body_x_span": body_x_span,
+        "body_y_span": body_y_span,
+    }
+
+
+def is_plank_ready_pose(
+    lm: list,
+    side: str,
+    *,
+    max_body_axis_angle_deg: float = 35.0,
+    max_torso_angle_deg: float = 45.0,
+    max_leg_angle_deg: float = 45.0,
+    min_body_horizontal_ratio: float = 1.15,
+    min_torso_horizontal_ratio: float = 0.75,
+    min_leg_horizontal_ratio: float = 0.75,
+) -> Tuple[bool, Dict[str, float]]:
+    """Check whether the body is horizontal enough to start plank inference."""
+    metrics = extract_posture_metrics(lm, side)
+    is_ready = (
+        metrics["body_axis_angle_deg"] <= max_body_axis_angle_deg
+        and metrics["torso_angle_deg"] <= max_torso_angle_deg
+        and metrics["leg_angle_deg"] <= max_leg_angle_deg
+        and metrics["body_horizontal_ratio"] >= min_body_horizontal_ratio
+        and metrics["torso_horizontal_ratio"] >= min_torso_horizontal_ratio
+        and metrics["leg_horizontal_ratio"] >= min_leg_horizontal_ratio
+    )
+    metrics.update(
+        {
+            "plank_pose_ok": is_ready,
+            "max_body_axis_angle_deg": float(max_body_axis_angle_deg),
+            "max_torso_angle_deg": float(max_torso_angle_deg),
+            "max_leg_angle_deg": float(max_leg_angle_deg),
+            "min_body_horizontal_ratio": float(min_body_horizontal_ratio),
+            "min_torso_horizontal_ratio": float(min_torso_horizontal_ratio),
+            "min_leg_horizontal_ratio": float(min_leg_horizontal_ratio),
+        }
+    )
+    return is_ready, metrics
 
 
 def extract_frame_features(lm: list, side: str) -> Tuple[float, float, float]:
@@ -39,14 +142,7 @@ def extract_frame_features(lm: list, side: str) -> Tuple[float, float, float]:
     """
     landmark_xyz = get_xyz(lm)
 
-    if side == "right":
-        shoulder_index = RIGHT_SHOULDER_INDEX
-        hip_index = RIGHT_HIP_INDEX
-        ankle_index = RIGHT_ANKLE_INDEX
-    else:
-        shoulder_index = LEFT_SHOULDER_INDEX
-        hip_index = LEFT_HIP_INDEX
-        ankle_index = LEFT_ANKLE_INDEX
+    shoulder_index, hip_index, ankle_index = _side_indices(side)
 
     selected_shoulder = landmark_xyz[shoulder_index]
     selected_hip = landmark_xyz[hip_index]

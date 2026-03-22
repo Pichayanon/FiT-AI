@@ -21,7 +21,6 @@ from fastapi import WebSocket
 from shared.base_session import BaseWebSocketSession
 from shared.frame_decoder import FrameDecoder
 from shared.frame_quality import FrameQuality
-from shared.json_utils import parse_json
 from shared.sklearn_model_service import SklearnModelService
 from shared.side_gate import SideGate
 from shared.label_mapper import LabelMapper
@@ -259,6 +258,38 @@ class WallSitWebSocketSession(BaseWebSocketSession):
             self.st.dark_since = None
             self.st.dark_alerted = False
 
+    async def _update_dark_watchdog(
+        self,
+        too_dark: bool,
+        brightness_mean: float,
+    ) -> None:
+        """Send a light warning once darkness persists beyond the threshold."""
+        now = time.time()
+
+        if not too_dark:
+            self.st.dark_since = None
+            self.st.dark_alerted = False
+            return
+
+        if self.st.dark_since is None:
+            self.st.dark_since = now
+            self.st.dark_alerted = False
+            return
+
+        if self.st.dark_alerted:
+            return
+
+        if now - self.st.dark_since >= self.dark_adjust_seconds:
+            await self.status.send_info(
+                self.ws,
+                "Please adjust your lights.",
+                {
+                    "brightness_mean": round(brightness_mean, 1),
+                    "brightness_th": self.dark_brightness_th,
+                },
+            )
+            self.st.dark_alerted = True
+
     # ---------------------------------------------------------------
     # Frame handler
     # ---------------------------------------------------------------
@@ -278,6 +309,7 @@ class WallSitWebSocketSession(BaseWebSocketSession):
 
         # Step 2: Check brightness
         too_dark, brightness_mean = FrameQuality.is_too_dark(frame, self.dark_brightness_th)
+        await self._update_dark_watchdog(too_dark, brightness_mean)
 
         # Step 3: Run pose detection
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -302,8 +334,6 @@ class WallSitWebSocketSession(BaseWebSocketSession):
         # Pose regained: reset watchdogs
         self.st.no_pose_since = None
         self.st.no_pose_alerted = False
-        self.st.dark_since = None
-        self.st.dark_alerted = False
 
         # Step 5: Track ready streak
         self.st.ready_streak += 1
@@ -476,29 +506,6 @@ class WallSitWebSocketSession(BaseWebSocketSession):
         if self.st.no_pose_since is None:
             self.st.no_pose_since = now
             self.st.no_pose_alerted = False
-
-        # Track DARK watchdog
-        if too_dark:
-            if self.st.dark_since is None:
-                self.st.dark_since = now
-                self.st.dark_alerted = False
-        else:
-            self.st.dark_since = None
-            self.st.dark_alerted = False
-
-        # DARK alert (takes priority over NO_POSE)
-        if (
-            too_dark
-            and (self.st.dark_since is not None)
-            and (not self.st.dark_alerted)
-            and (now - self.st.dark_since >= self.dark_adjust_seconds)
-        ):
-            await self.status.send_info(
-                self.ws,
-                "Please adjust your lights.",
-                {"brightness_mean": round(brightness_mean, 1), "brightness_th": self.dark_brightness_th},
-            )
-            self.st.dark_alerted = True
 
         # NO_POSE alert (only if not explained by darkness)
         if (

@@ -30,15 +30,10 @@ if __package__ in {None, ""}:
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-import json
 import os
 import time
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict
 
-import numpy as np
-import cv2
 import mediapipe as mp
 from fastapi import WebSocket
 
@@ -61,8 +56,6 @@ _DIR = os.path.dirname(__file__)
 BOTTOM_MODEL_PATH = os.path.join(_DIR, "models", "lunges_bottom_tcn.pt")
 PHASE_MODEL_PATH = os.path.join(_DIR, "models", "lunge_phase_tcn.pt")
 
-# BOTTOM_FEATURE_DIM, joint indices imported from lunges.features
-
 PRE_FRAMES = 15
 POST_FRAMES = 15
 MIN_GAP = 18  # min frames between bottom events
@@ -81,7 +74,8 @@ MP_MIN_TRACK_CONF = 0.50
 STATUS_SEND_EVERY_N_FRAMES = 3
 PHASE_SEND_EVERY_N_FRAMES = 2
 
-
+DARK_ADJUST_SECONDS = 3.0
+DARK_BRIGHTNESS_TH = 55.0
 
 GOAL_GOOD_REPS = 5
 
@@ -119,6 +113,8 @@ def health() -> Dict[str, Any]:
         "phase_loaded": model_service.phase_loaded,
         "bottom_in_dim": model_service.bottom_in_dim,
         "vis_th": VIS_TH,
+        "dark_adjust_seconds": DARK_ADJUST_SECONDS,
+        "dark_brightness_th": DARK_BRIGHTNESS_TH,
         "timestamp": int(time.time()),
     }
 
@@ -144,6 +140,8 @@ async def ws_video(websocket: WebSocket) -> None:
         post_frames=POST_FRAMES,
         min_gap=MIN_GAP,
         gate_knee_angle=GATE_KNEE_ANGLE,
+        dark_adjust_seconds=DARK_ADJUST_SECONDS,
+        dark_brightness_th=DARK_BRIGHTNESS_TH,
         goal_good_reps=GOAL_GOOD_REPS,
         mp_min_det_conf=MP_MIN_DET_CONF,
         mp_min_track_conf=MP_MIN_TRACK_CONF,
@@ -156,4 +154,4 @@ async def ws_video(websocket: WebSocket) -> None:
 # ---------------------------------------------------------------
 
 if __name__ == "__main__":
-    serve("lunges.lunges_streaming:app", port=5053)
+    serve(app, port=5053)

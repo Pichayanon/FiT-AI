@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
@@ -22,8 +21,7 @@ from fastapi import WebSocket
 
 from shared.base_session import BaseWebSocketSession
 from shared.frame_decoder import FrameDecoder
-from shared.json_utils import parse_json
-from shared.math_utils import angle_3pts
+from shared.frame_quality import FrameQuality
 from shared.side_view_gate_dynamic import SideViewGateDynamic
 from shared.status_sender import StatusSender
 from shared.tcn_models import PhaseTCN
@@ -31,7 +29,6 @@ from shared.tcn_service import load_phase_tcn, load_tcn, tcn_predict
 
 from lunges.features import (
     BOTTOM_FEATURE_DIM,
-    L_EAR, R_EAR, L_SHO, R_SHO, L_HIP, R_HIP, L_KNE, R_KNE, L_ANK, R_ANK,
     extract_bottom_features,
     extract_phase_features as extract_phase_features_from_lm,
     LandmarkSmoother,
@@ -160,6 +157,10 @@ class StreamState:
     # Pending bottom event
     pending: Optional[Dict[str, Any]] = None
 
+    # DARK watchdog
+    dark_since: Optional[float] = None
+    dark_alerted: bool = False
+
 
 # ---------------------------------------------------------------
 # Lunge WebSocket Session
@@ -182,6 +183,8 @@ class LungeWebSocketSession(BaseWebSocketSession):
         post_frames: int,
         min_gap: int,
         gate_knee_angle: float,
+        dark_adjust_seconds: float,
+        dark_brightness_th: float,
         goal_good_reps: int,
         mp_min_det_conf: float,
         mp_min_track_conf: float,
@@ -199,6 +202,8 @@ class LungeWebSocketSession(BaseWebSocketSession):
         self.post_frames = post_frames
         self.min_gap = min_gap
         self.gate_knee_angle = gate_knee_angle
+        self.dark_adjust_seconds = dark_adjust_seconds
+        self.dark_brightness_th = dark_brightness_th
         self.goal_good_reps = goal_good_reps
 
         self.st = StreamState()
@@ -240,7 +245,7 @@ class LungeWebSocketSession(BaseWebSocketSession):
 
     def _create_state(self) -> StreamState:
         """Return a fresh StreamState; base will set started=True and session_id."""
-        return StreamState()
+        return StreamState(hist=deque(maxlen=self.pre_frames + self.post_frames + 240))
 
     async def _on_start(self) -> None:
         """Reset frame counter and landmark smoother for the new session."""
@@ -275,6 +280,38 @@ class LungeWebSocketSession(BaseWebSocketSession):
         self.st.prev_phase_vals = None
         self.smoother.reset()
 
+    async def _update_dark_watchdog(
+        self,
+        too_dark: bool,
+        brightness_mean: float,
+    ) -> None:
+        """Send a light warning once darkness persists beyond the threshold."""
+        now = time.time()
+
+        if not too_dark:
+            self.st.dark_since = None
+            self.st.dark_alerted = False
+            return
+
+        if self.st.dark_since is None:
+            self.st.dark_since = now
+            self.st.dark_alerted = False
+            return
+
+        if self.st.dark_alerted:
+            return
+
+        if now - self.st.dark_since >= self.dark_adjust_seconds:
+            await self.status.send_info(
+                self.ws,
+                "Please adjust your lights.",
+                {
+                    "brightness_mean": round(brightness_mean, 1),
+                    "brightness_th": self.dark_brightness_th,
+                },
+            )
+            self.st.dark_alerted = True
+
     # ---------------------------------------------------------------
     # Bottom prediction
     # ---------------------------------------------------------------
@@ -283,20 +320,33 @@ class LungeWebSocketSession(BaseWebSocketSession):
         self,
         event_i: int,
         phase: str,
+        force: bool = False,
     ) -> None:
         """Run bottom TCN prediction for a given event and send result.
 
         Extracts the feature window from history, runs prediction,
         updates rep counter, and sends the result payload.
+
+        Args:
+            event_i: Frame index of the bottom event.
+            phase:   Current phase label (for the result payload).
+            force:   If True, predict with however many frames are available
+                     (used when we've already passed the window end and waiting
+                     longer would not help — e.g. due to dropped frames).
         """
         start = event_i - self.pre_frames
         end = event_i + self.post_frames
         need = self.pre_frames + self.post_frames + 1
         history_window = [record for record in self.st.hist if start <= record[0] <= end]
 
-        if len(history_window) < need:
+        if len(history_window) < need and not force:
             # Not enough frames yet — set as pending
             self.st.pending = {"event": event_i, "start": start, "end": end}
+            return
+
+        if len(history_window) == 0:
+            # Nothing at all — abandon
+            self.st.pending = None
             return
 
         self.st.pending = None
@@ -356,17 +406,27 @@ class LungeWebSocketSession(BaseWebSocketSession):
             await self.status.send_info(self.ws, "Decode failed")
             return
 
-        # Step 2: Run pose detection
+        # Step 2: Check brightness and run pose detection
+        too_dark, brightness_mean = FrameQuality.is_too_dark(
+            frame,
+            self.dark_brightness_th,
+        )
+        await self._update_dark_watchdog(too_dark, brightness_mean)
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pose_result = self.pose.process(img_rgb)
 
         # Step 3: Handle no pose
         if not pose_result.pose_landmarks:
             self._reset_buffers()
-            self.smoother.reset()
             await self.status.send_status(
                 self.ws, self.st, "waiting",
-                {"ready_streak": 0, "needed_streak": self.ready_streak_n},
+                {
+                    "ready_streak": 0,
+                    "needed_streak": self.ready_streak_n,
+                    "too_dark": too_dark,
+                    "brightness_mean": round(brightness_mean, 1),
+                    "brightness_th": self.dark_brightness_th,
+                },
             )
             self.frame_i += 1
             return
@@ -388,8 +448,9 @@ class LungeWebSocketSession(BaseWebSocketSession):
 
         ok_side, gate_dbg = self.gate.check(landmark_array)
         self.st.last_gate_debug = gate_dbg
+        side_view_ok = ok_side or bool(gate_dbg.get("single_side_profile_ok"))
 
-        if not ok_side:
+        if not side_view_ok:
             self._reset_buffers()
             await self.status.send_status(
                 self.ws, self.st, "waiting",
@@ -398,6 +459,9 @@ class LungeWebSocketSession(BaseWebSocketSession):
                     "needed_streak": self.ready_streak_n,
                     "gate": gate_dbg if self.debug else None,
                     "reason": gate_dbg.get("reason", "side_gate_not_ok"),
+                    "too_dark": too_dark,
+                    "brightness_mean": round(brightness_mean, 1),
+                    "brightness_th": self.dark_brightness_th,
                 },
             )
             self.frame_i += 1
@@ -458,7 +522,6 @@ class LungeWebSocketSession(BaseWebSocketSession):
         event_i = None
         if phase == "concentric" and self.st.prev_phase == "eccentric":
             if self.frame_i - self.st.last_phase_bottom_i >= self.min_gap:
-                # Depth gate: only trigger if knee angle is low enough
                 if knee_avg <= self.gate_knee_angle:
                     event_i = self.frame_i
                     self.st.last_phase_bottom_i = self.frame_i
@@ -485,8 +548,13 @@ class LungeWebSocketSession(BaseWebSocketSession):
             history_window = [
                 record for record in self.st.hist if start <= record[0] <= end
             ]
-            if len(history_window) >= need:
+            # Resolve when we have all frames OR when we've passed the window
+            # end (handles dropped frames — predict with whatever we collected).
+            past_window = self.frame_i >= end
+            if len(history_window) >= need or past_window:
                 self.st.pending = None
-                await self._predict_and_send_bottom(pending_event, phase)
+                await self._predict_and_send_bottom(
+                    pending_event, phase, force=past_window
+                )
 
         self.frame_i += 1

@@ -15,6 +15,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
+import cv2
 import numpy as np
 import torch
 import mediapipe as mp
@@ -22,7 +23,7 @@ from fastapi import WebSocket
 
 from shared.base_session import BaseWebSocketSession
 from shared.frame_decoder import FrameDecoder
-from shared.json_utils import parse_json
+from shared.frame_quality import FrameQuality
 from shared.math_utils import angle_3pts
 from shared.status_sender import StatusSender
 from shared.tcn_service import load_tcn, load_phase_tcn, tcn_predict
@@ -89,7 +90,11 @@ class SquatModelService:
             feature_window.astype(np.float32),
         )
 
-    def predict_phase(self, feature_window: np.ndarray) -> str:
+    def predict_phase(
+        self,
+        feature_window: np.ndarray,
+        decision_mode: str = "last_logits",
+    ) -> str:
         """Run phase TCN prediction. Returns 'eccentric', 'concentric', or 'unknown'."""
         if (
             self.phase_model is None
@@ -101,9 +106,19 @@ class SquatModelService:
         phase_feature_window = feature_window[-phase_window_size:].astype(np.float32)
         phase_feature_tensor = torch.from_numpy(phase_feature_window).unsqueeze(0)
         with torch.no_grad():
-            logits = self.phase_model(phase_feature_tensor)  # (1, W, 2)
-            last_logits = logits[0, -1, :]
-            predicted_phase_index = int(torch.argmax(last_logits).item())
+            logits = self.phase_model(phase_feature_tensor)[0]  # (W, 2)
+            if decision_mode == "majority_vote":
+                # Causal approximation of the offline extractor's vote-based phase
+                # labeling: vote over timestep predictions in the latest window.
+                timestep_predictions = torch.argmax(logits, dim=1).cpu().numpy()
+                vote_counts = np.bincount(
+                    timestep_predictions,
+                    minlength=len(_PHASE_LABELS),
+                )
+                predicted_phase_index = int(np.argmax(vote_counts))
+            else:
+                last_logits = logits[-1, :]
+                predicted_phase_index = int(torch.argmax(last_logits).item())
         return _PHASE_LABELS.get(predicted_phase_index, "unknown")
 
 
@@ -149,8 +164,6 @@ class StreamState:
     stand_streak: int = 0
     prev_knee_raw: Optional[float] = None
     last_stand_pred_i: int = -10**9
-    last_stand_pred_label: str = ""
-    last_stand_pred_conf: Optional[float] = None
     stand_checked_once: bool = False
     stand_ok: bool = False
 
@@ -164,9 +177,8 @@ class StreamState:
     last_sent_bottom_event_i: int = -10**9
     last_sent_stand_label: str = ""
 
-    # History: (i, stand_feat, bottom_feat, frame_bgr, knee_raw, knee_ema)
-    # Note: PRE_FRAMES and POST_FRAMES are defined in squat_streaming.py
-    hist: deque = field(default_factory=lambda: deque(maxlen=5 + 5 + 240))
+    # History: (i, stand_feat, bottom_feat)
+    hist: deque = field(default_factory=deque)
 
     # Phase TCN buffer
     phase_feat_buffer: deque = field(default_factory=lambda: deque(maxlen=35))
@@ -175,6 +187,10 @@ class StreamState:
 
     # Pending bottom event
     pending: Optional[Dict[str, Any]] = None
+
+    # DARK watchdog
+    dark_since: Optional[float] = None
+    dark_alerted: bool = False
 
 
 # ---------------------------------------------------------------
@@ -199,10 +215,13 @@ class SquatWebSocketSession(BaseWebSocketSession):
         pre_frames: int,
         post_frames: int,
         min_gap: int,
+        phase_decision_mode: str,
         stand_knee_angle_deg_th: float,
         stand_knee_delta_max_deg: float,
         stand_min_streak: int,
         stand_pred_cooldown: int,
+        dark_adjust_seconds: float,
+        dark_brightness_th: float,
         goal_good_reps: int,
         mp_min_det_conf: float,
         mp_min_track_conf: float,
@@ -221,10 +240,13 @@ class SquatWebSocketSession(BaseWebSocketSession):
         self.pre_frames = pre_frames
         self.post_frames = post_frames
         self.min_gap = min_gap
+        self.phase_decision_mode = phase_decision_mode
         self.stand_knee_angle_deg_th = stand_knee_angle_deg_th
         self.stand_knee_delta_max_deg = stand_knee_delta_max_deg
         self.stand_min_streak = stand_min_streak
         self.stand_pred_cooldown = stand_pred_cooldown
+        self.dark_adjust_seconds = dark_adjust_seconds
+        self.dark_brightness_th = dark_brightness_th
         self.goal_good_reps = goal_good_reps
 
         self.st = StreamState()
@@ -266,6 +288,7 @@ class SquatWebSocketSession(BaseWebSocketSession):
                 "front_gate": {
                     "needed_streak": self.ready_streak_n,
                 },
+                "phase_decision_mode": self.phase_decision_mode,
                 "stand_once_only": False,
                 "stand_ok_labels": list(self.stand_ok_labels),
             },
@@ -277,7 +300,7 @@ class SquatWebSocketSession(BaseWebSocketSession):
 
     def _create_state(self) -> StreamState:
         """Return a fresh StreamState; base will set started=True and session_id."""
-        return StreamState()
+        return StreamState(hist=deque(maxlen=self.pre_frames + self.post_frames + 240))
 
     async def _on_start(self) -> None:
         """Reset the frame counter for the new session."""
@@ -313,6 +336,38 @@ class SquatWebSocketSession(BaseWebSocketSession):
         self.st.last_sent_bottom_event_i = -10**9
         self.st.last_sent_stand_label = ""
 
+    async def _update_dark_watchdog(
+        self,
+        too_dark: bool,
+        brightness_mean: float,
+    ) -> None:
+        """Send a light warning once darkness persists beyond the threshold."""
+        now = time.time()
+
+        if not too_dark:
+            self.st.dark_since = None
+            self.st.dark_alerted = False
+            return
+
+        if self.st.dark_since is None:
+            self.st.dark_since = now
+            self.st.dark_alerted = False
+            return
+
+        if self.st.dark_alerted:
+            return
+
+        if now - self.st.dark_since >= self.dark_adjust_seconds:
+            await self.status.send_info(
+                self.ws,
+                "Please adjust your lights.",
+                {
+                    "brightness_mean": round(brightness_mean, 1),
+                    "brightness_th": self.dark_brightness_th,
+                },
+            )
+            self.st.dark_alerted = True
+
     # ---------------------------------------------------------------
     # Bottom prediction
     # ---------------------------------------------------------------
@@ -321,20 +376,33 @@ class SquatWebSocketSession(BaseWebSocketSession):
         self,
         event_i: int,
         phase: str,
+        force: bool = False,
     ) -> None:
         """Run bottom TCN prediction for a given event and send result.
 
         Extracts the feature window from history, runs prediction,
         updates rep counter, and sends the result payload.
+
+        Args:
+            event_i: Frame index of the bottom event.
+            phase:   Current phase label (for the result payload).
+            force:   If True, predict with however many frames are available
+                     (used when we've already passed the window end and waiting
+                     longer would not help — e.g. due to dropped frames).
         """
         start = event_i - self.pre_frames
         end = event_i + self.post_frames
         need = self.pre_frames + self.post_frames + 1
         history_window = [record for record in self.st.hist if start <= record[0] <= end]
 
-        if len(history_window) < need:
+        if len(history_window) < need and not force:
             # Not enough frames yet — set as pending
             self.st.pending = {"event": event_i, "start": start, "end": end}
+            return
+
+        if len(history_window) == 0:
+            # Nothing at all — abandon
+            self.st.pending = None
             return
 
         self.st.pending = None
@@ -394,8 +462,12 @@ class SquatWebSocketSession(BaseWebSocketSession):
             await self.status.send_info(self.ws, "Decode failed")
             return
 
-        # Step 2: Run pose detection
-        import cv2
+        # Step 2: Check brightness and run pose detection
+        too_dark, brightness_mean = FrameQuality.is_too_dark(
+            frame,
+            self.dark_brightness_th,
+        )
+        await self._update_dark_watchdog(too_dark, brightness_mean)
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pose_result = self.pose.process(img_rgb)
 
@@ -404,7 +476,13 @@ class SquatWebSocketSession(BaseWebSocketSession):
             self._reset_buffers()
             await self.status.send_status(
                 self.ws, self.st, "waiting",
-                {"ready_streak": 0, "needed_streak": self.ready_streak_n},
+                {
+                    "ready_streak": 0,
+                    "needed_streak": self.ready_streak_n,
+                    "too_dark": too_dark,
+                    "brightness_mean": round(brightness_mean, 1),
+                    "brightness_th": self.dark_brightness_th,
+                },
             )
             self.frame_i += 1
             return
@@ -423,6 +501,9 @@ class SquatWebSocketSession(BaseWebSocketSession):
                     "needed_streak": self.ready_streak_n,
                     "gate": gate_dbg if self.debug else None,
                     "reason": "front_gate_not_ok",
+                    "too_dark": too_dark,
+                    "brightness_mean": round(brightness_mean, 1),
+                    "brightness_th": self.dark_brightness_th,
                 },
             )
             self.frame_i += 1
@@ -473,18 +554,12 @@ class SquatWebSocketSession(BaseWebSocketSession):
         knee_raw = float((left_knee_angle + right_knee_angle) * 0.5)
 
         # Stand gate
-        knee_delta = abs(knee_raw - self.st.prev_knee_raw) if self.st.prev_knee_raw is not None else 0.0
         is_stand = knee_raw >= self.stand_knee_angle_deg_th
         self.st.prev_knee_raw = knee_raw
         if is_stand:
             self.st.stand_streak += 1
         else:
             self.st.stand_streak = 0
-        stand_gate_text = (
-            f"STAND_GATE: {'YES' if is_stand else 'no'} "
-            f"streak {self.st.stand_streak}/{self.stand_min_streak} "
-            f"knee={knee_raw:.1f} d={knee_delta:.1f}"
-        )
 
         stand_feature_vector = extract_stand_features(landmarks)
         bottom_feature_vector = extract_bottom_features(landmarks)
@@ -492,7 +567,10 @@ class SquatWebSocketSession(BaseWebSocketSession):
         # Step 7: Phase detection
         self.st.phase_feat_buffer.append(extract_phase_features(landmarks))
         if self.model_svc.phase_loaded and len(self.st.phase_feat_buffer) >= self.model_svc.phase_window:
-            phase = self.model_svc.predict_phase(np.array(self.st.phase_feat_buffer))
+            phase = self.model_svc.predict_phase(
+                np.array(self.st.phase_feat_buffer),
+                decision_mode=self.phase_decision_mode,
+            )
         else:
             phase = "unknown"
         await self.status.send_phase(self.ws, self.st, phase)
@@ -511,9 +589,6 @@ class SquatWebSocketSession(BaseWebSocketSession):
                 self.frame_i,
                 stand_feature_vector,
                 bottom_feature_vector,
-                frame.copy(),
-                knee_raw,
-                None,
             )
         )
 
@@ -530,9 +605,14 @@ class SquatWebSocketSession(BaseWebSocketSession):
             history_window = [
                 record for record in self.st.hist if start <= record[0] <= end
             ]
-            if len(history_window) >= need:
+            # Resolve when we have all frames OR when we've passed the window
+            # end (handles dropped frames — predict with whatever we collected).
+            past_window = self.frame_i >= end
+            if len(history_window) >= need or past_window:
                 self.st.pending = None
-                await self._predict_and_send_bottom(pending_event, phase)
+                await self._predict_and_send_bottom(
+                    pending_event, phase, force=past_window
+                )
 
         # Step 11: Standing posture prediction (before first rep)
         stand_win_frames = self.pre_frames + self.post_frames + 1
