@@ -271,6 +271,7 @@ final class WorkoutSessionViewModel: ObservableObject {
     private let speechLang = "en-US"
     private let previewDurationSeconds = 8
     private let introOverlayPostSpeechDelaySeconds = 2.0
+    private let isSessionRecordingEnabled = true
 
     // WebSocket endpoints (one per exercise backend)
     private let wsWallSitURL = "ws://172.20.10.5:5050/ws/video"
@@ -399,7 +400,9 @@ final class WorkoutSessionViewModel: ObservableObject {
             ? "Streaming to backend..."
             : "Listen and get in position..."
 
-        cameraManager.beginSessionRecording()
+        if isSessionRecordingEnabled {
+            cameraManager.beginSessionRecording()
+        }
         speech.speak(
             "Session started",
             language: speechLang,
@@ -514,14 +517,21 @@ final class WorkoutSessionViewModel: ObservableObject {
         speech.speak(completionSpeech, language: speechLang, minInterval: 0)
         feedback = "Saving summary..."
 
-        cameraManager.finishSessionRecording { [weak self] url in
-            guard let self else { return }
+        if isSessionRecordingEnabled {
+            cameraManager.finishSessionRecording { [weak self] url in
+                guard let self else { return }
 
-            let videoFileName = url?.lastPathComponent
-            self.sessionSummary = self.buildSessionSummary(sessionVideoFileName: videoFileName)
-            Task { await self.workoutHistory.saveSession(summary: self.sessionSummary, setTitle: self.setTitle) }
-            self.isFinalizingSession = false
-            self.navigateToResult = true
+                let videoFileName = url?.lastPathComponent
+                self.sessionSummary = self.buildSessionSummary(sessionVideoFileName: videoFileName)
+                Task { await self.workoutHistory.saveSession(summary: self.sessionSummary, setTitle: self.setTitle) }
+                self.isFinalizingSession = false
+                self.navigateToResult = true
+            }
+        } else {
+            sessionSummary = buildSessionSummary(sessionVideoFileName: nil)
+            Task { await workoutHistory.saveSession(summary: sessionSummary, setTitle: setTitle) }
+            isFinalizingSession = false
+            navigateToResult = true
         }
     }
 

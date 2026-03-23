@@ -236,7 +236,11 @@ final class CameraService: NSObject, ObservableObject {
     /// Sets up the capture session with front camera input and video output.
     private func configureSession() {
         session.beginConfiguration()
-        session.sessionPreset = .high
+        if session.canSetSessionPreset(.medium) {
+            session.sessionPreset = .medium
+        } else {
+            session.sessionPreset = .high
+        }
 
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) ??
                           AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
