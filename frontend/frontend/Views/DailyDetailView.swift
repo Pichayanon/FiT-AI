@@ -15,13 +15,13 @@ struct DailyDetailView: View {
             ScrollView {
                 VStack(spacing: 32) {
                     heroMetricSection
-                    
+
                     VStack(alignment: .leading, spacing: 16) {
                         Text("Completed Sets")
                             .font(.title3.weight(.bold))
                             .foregroundColor(.white)
                             .padding(.horizontal, 20)
-                        
+
                         LazyVStack(spacing: 12) {
                             ForEach(viewModel.workoutSets) { set in
                                 workoutSetCard(set)
@@ -36,17 +36,17 @@ struct DailyDetailView: View {
         .navigationTitle(viewModel.date.formatted(.dateTime.weekday().month().day()))
         .navigationBarTitleDisplayMode(.inline)
     }
-    
+
     private var heroMetricSection: some View {
         VStack(spacing: 8) {
             Image(systemName: "flame.circle.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(.orange, .orange.opacity(0.2))
-            
+
             Text("\(viewModel.totalCalories)")
                 .font(.system(size: 64, weight: .heavy, design: .rounded))
                 .foregroundColor(.white)
-            
+
             Text("Total Active Kilocalories")
                 .font(.headline)
                 .foregroundColor(.white.opacity(0.6))
@@ -58,7 +58,7 @@ struct DailyDetailView: View {
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .padding(.horizontal, 20)
     }
-    
+
     private func workoutSetCard(_ set: WorkoutSetSummary) -> some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
@@ -70,7 +70,7 @@ struct DailyDetailView: View {
                     .foregroundColor(.white.opacity(0.6))
             }
             Spacer()
-            
+
             Text("\(set.totalCalories) kcal")
                 .font(.headline.weight(.semibold))
                 .foregroundColor(.yellow)

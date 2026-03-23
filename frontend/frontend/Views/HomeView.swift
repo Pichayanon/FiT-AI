@@ -41,7 +41,6 @@ struct HomeView: View {
                         NavigationLink(destination: ProgressView()) {
                             MenuButton(icon: "chart.bar.fill", title: "Progress")
                         }
-
                     }
 
                     Text("Workout Programs")
@@ -71,7 +70,7 @@ struct HomeView: View {
 // MARK: - Menu Button
 
 /// Circular icon button with a label used for top navigation shortcuts.
-fileprivate struct MenuButton: View {
+private struct MenuButton: View {
     let icon: String
     let title: String
     var body: some View {
@@ -92,7 +91,7 @@ fileprivate struct MenuButton: View {
 // MARK: - Workout Set Card
 
 /// Card displaying a workout program with a background image, title, and description.
-fileprivate struct WorkoutSetCard: View {
+private struct WorkoutSetCard: View {
     let title: String
     let description: String
     let imageName: String
@@ -106,11 +105,11 @@ fileprivate struct WorkoutSetCard: View {
                     .frame(height: 180)
                     .cornerRadius(16)
                     .clipped()
-                
+
                 LinearGradient(gradient: Gradient(colors: [.black.opacity(0.8), .clear]),
                                startPoint: .bottom, endPoint: .center)
                     .cornerRadius(16)
-                
+
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
                         .font(.title2)

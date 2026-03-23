@@ -117,8 +117,8 @@ private final class SessionVideoRecorder {
                 AVVideoHeightKey: height,
                 AVVideoCompressionPropertiesKey: [
                     AVVideoAverageBitRateKey: max(width * height * 8, 2_000_000),
-                    AVVideoExpectedSourceFrameRateKey: 30,
-                ],
+                    AVVideoExpectedSourceFrameRateKey: 30
+                ]
             ]
             let writerInput = AVAssetWriterInput(
                 mediaType: .video,
@@ -212,7 +212,7 @@ final class CameraService: NSObject, ObservableObject {
     let session = AVCaptureSession()
 
     @Published var isRunning: Bool = false
-    @Published var lastError: String? = nil
+    @Published var lastError: String?
 
     /// Called on the main queue whenever the backend sends a text message.
     var onBackendMessage: ((String) -> Void)?

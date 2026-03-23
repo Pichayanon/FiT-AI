@@ -8,7 +8,7 @@ struct WorkoutDetailView: View {
     init(setTitle: String) {
         _viewModel = StateObject(wrappedValue: WorkoutDetailViewModel(setTitle: setTitle))
     }
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(viewModel.setTitle)
@@ -32,9 +32,9 @@ struct WorkoutDetailView: View {
                     }
                 }
             }
-            
+
             Spacer()
-            
+
             NavigationLink(
                 destination: WorkoutSessionView(
                     setTitle: viewModel.setTitle,
@@ -58,7 +58,7 @@ struct WorkoutDetailView: View {
 // MARK: - Exercise Card
 
 /// Card showing an exercise image, name, and rep/hold target.
-fileprivate struct ExerciseCard: View {
+private struct ExerciseCard: View {
     let exercise: WorkoutExercise
 
     var body: some View {

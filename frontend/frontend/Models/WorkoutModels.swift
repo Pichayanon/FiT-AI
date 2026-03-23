@@ -41,13 +41,21 @@ enum WorkoutSessionMode: String {
     var demoInstructionText: String {
         switch self {
         case .wallSit:
-            return "Wall-sit. Stand sideways to the camera and make sure your full body is visible. Keep your back against the wall, lower down until your knees are about 90 degrees. Keep your body straight and hold the position."
+            return "Wall-sit. Stand sideways to the camera and make sure your full body is visible. "
+                + "Keep your back against the wall, lower down until your knees are about 90 degrees. "
+                + "Keep your body straight and hold the position."
         case .squat:
-            return "Squat. Face the camera and make sure your full body is visible. Slowly lower your body until your hips are at knee level. Then push back up to a standing position."
+            return "Squat. Face the camera and make sure your full body is visible. "
+                + "Slowly lower your body until your hips are at knee level. "
+                + "Then push back up to a standing position."
         case .plank:
-            return "Plank. Stand sideways to the camera and make sure your full body is visible. Lower yourself down onto your forearms, keeping your elbows under your shoulders. Keep your body straight and hold the position."
+            return "Plank. Stand sideways to the camera and make sure your full body is visible. "
+                + "Lower yourself down onto your forearms, keeping your elbows under your shoulders. "
+                + "Keep your body straight and hold the position."
         case .lunges:
-            return "Lunges. Stand sideways to the camera and make sure your full body is visible. Step forward, lower until both knees bend comfortably, then push back to the starting position."
+            return "Lunges. Stand sideways to the camera and make sure your full body is visible. "
+                + "Step forward, lower until both knees bend comfortably, "
+                + "then push back to the starting position."
         }
     }
 }
@@ -75,7 +83,7 @@ enum WorkoutCatalog {
         exercises: [
             WorkoutExercise(name: "Wall-Sit", imageName: "wallsit", reps: "5s hold"),
             WorkoutExercise(name: "Squat", imageName: "squat", reps: "3 correct reps"),
-            WorkoutExercise(name: "Plank", imageName: "plank", reps: "5s hold"),
+            WorkoutExercise(name: "Plank", imageName: "plank", reps: "5s hold")
         ],
         initialMode: .wallSit
     )
@@ -85,7 +93,7 @@ enum WorkoutCatalog {
         description: "Plank",
         imageName: "set2",
         exercises: [
-            WorkoutExercise(name: "Plank", imageName: "plank", reps: "5s hold"),
+            WorkoutExercise(name: "Plank", imageName: "plank", reps: "5s hold")
         ],
         initialMode: .plank
     )
@@ -95,7 +103,7 @@ enum WorkoutCatalog {
         description: "Lunges",
         imageName: "set3",
         exercises: [
-            WorkoutExercise(name: "Lunges", imageName: "lunges", reps: "3 correct reps"),
+            WorkoutExercise(name: "Lunges", imageName: "lunges", reps: "3 correct reps")
         ],
         initialMode: .lunges
     )
@@ -103,7 +111,7 @@ enum WorkoutCatalog {
     static let programs: [WorkoutProgramDefinition] = [
         beginnerLevel1,
         beginnerLevel2,
-        beginnerLevel3,
+        beginnerLevel3
     ]
 
     /// Looks up a program by title; falls back to `beginnerLevel1` if not found.
@@ -331,7 +339,10 @@ extension WorkoutSessionRecord {
               let setTitle = data["setTitle"] as? String,
               let totalTimeSeconds = data["totalTimeSeconds"] as? Int,
               let estimatedCalories = data["estimatedCalories"] as? Int else { return nil }
-        let completedAtSeconds: Double = (data["completedAtSeconds"] as? Double) ?? (data["completedAtSeconds"] as? Int).map { Double($0) } ?? 0
+        let completedAtSeconds: Double =
+            (data["completedAtSeconds"] as? Double)
+            ?? (data["completedAtSeconds"] as? Int).map(Double.init)
+            ?? 0
         let exercises: [ExerciseRecord] = (data["exercises"] as? [[String: Any]])?.compactMap { ExerciseRecord(from: $0) } ?? []
         let sessionVideoFileName = data["sessionVideoFileName"] as? String
         self.init(
@@ -351,9 +362,16 @@ extension WorkoutSessionRecord {
 extension ExerciseRecord {
     /// Failable initializer that parses a raw Firestore exercise dictionary.
     init?(from data: [String: Any]) {
-        guard let name = data["name"] as? String, let type = data["type"] as? String else { return nil }
+        guard let name = data["name"] as? String,
+              let type = data["type"] as? String else { return nil }
         let errors: [ErrorCountRecord] = (data["errors"] as? [[String: Any]])?
-            .compactMap { e in (e["reason"] as? String).flatMap { r in (e["count"] as? Int).map { ErrorCountRecord(reason: r, count: $0) } } } ?? []
+            .compactMap { entry in
+                (entry["reason"] as? String).flatMap { reason in
+                    (entry["count"] as? Int).map { count in
+                        ErrorCountRecord(reason: reason, count: count)
+                    }
+                }
+            } ?? []
         let mistakes: [MistakeEventRecord] = (data["mistakes"] as? [[String: Any]])?
             .compactMap { m in
                 (m["reason"] as? String).flatMap { reason in

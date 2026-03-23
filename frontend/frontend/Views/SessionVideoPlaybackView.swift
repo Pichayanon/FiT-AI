@@ -220,28 +220,33 @@ struct SessionVideoPlaybackView: View {
         player.seek(to: CMTime(seconds: playback.clipStartSecond, preferredTimescale: 600))
         return player
     }
-    
+
     private var mistakeExplanation: String {
         let reason = playback.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let context = playback.subtitle?.lowercased() ?? ""
 
         if reason.contains("feet too close") {
             if context.contains("wall-sit") {
-                return "Your feet are too close to the wall here, which makes the sitting angle and weight distribution less stable. Step your feet slightly farther away and keep your back supported against the wall."
+                return "Your feet are too close to the wall here, which makes the sitting angle "
+                    + "and weight distribution less stable. Step your feet slightly farther away "
+                    + "and keep your back supported against the wall."
             }
             return "Your stance is too narrow here. Move your feet slightly wider so you have a more stable base and better leg alignment."
         }
 
         if reason.contains("knees in") || reason.contains("knee in") {
-            return "Your knees are collapsing inward here. Push them out in line with your toes and keep your weight balanced on both sides."
+            return "Your knees are collapsing inward here. Push them out in line with your toes "
+                + "and keep your weight balanced on both sides."
         }
 
         if reason.contains("round back") {
-            return "Your back is rounding too much here. Brace your core, keep your chest open, and maintain a more neutral spine throughout the movement."
+            return "Your back is rounding too much here. Brace your core, keep your chest open, "
+                + "and maintain a more neutral spine throughout the movement."
         }
 
         if reason.contains("torso lean forward") {
-            return "Your torso is leaning too far forward here. Lift your chest, brace your core, and keep your weight more centered over your feet."
+            return "Your torso is leaning too far forward here. Lift your chest, brace your core, "
+                + "and keep your weight more centered over your feet."
         }
 
         if reason.contains("knee over toe") {
@@ -273,7 +278,8 @@ struct SessionVideoPlaybackView: View {
         }
 
         if reason.contains("elbow") {
-            return "Your elbow position is unstable here. Stay active through your arms and place your elbows in a position you can control more comfortably."
+            return "Your elbow position is unstable here. Stay active through your arms and place "
+                + "your elbows in a position you can control more comfortably."
         }
 
         return "Review this moment closely to see where your form starts to drift, then slow that part down and make it more controlled."

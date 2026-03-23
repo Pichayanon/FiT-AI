@@ -62,7 +62,7 @@ struct WorkoutResultView: View {
                 } else {
                     dismiss()
                 }
-            }) {
+            }, label: {
                 Text("Back to Home")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
@@ -70,7 +70,7 @@ struct WorkoutResultView: View {
                     .background(Color.yellow)
                     .foregroundColor(.black)
                     .cornerRadius(14)
-            }
+            })
             .buttonStyle(.plain)
             .padding(.horizontal, 20)
             .padding(.top, 12)
@@ -87,7 +87,7 @@ struct WorkoutResultView: View {
 // MARK: - Stat Pill
 
 /// Compact pill showing an SF Symbol icon with a text value (e.g., clock + "2 min 30 sec").
-fileprivate struct StatPill: View {
+private struct StatPill: View {
     let icon: String
     let value: String
 
@@ -111,7 +111,7 @@ fileprivate struct StatPill: View {
 // MARK: - Summary Exercise Card
 
 /// Card displaying detailed stats for one exercise (reps/hold and mistake timeline).
-fileprivate struct SummaryExerciseCard: View {
+private struct SummaryExerciseCard: View {
     let item: ExerciseSummaryItem
     let videoURL: URL?
     @Binding var selectedPlayback: SessionMistakePlayback?
@@ -193,7 +193,7 @@ fileprivate struct SummaryExerciseCard: View {
 // MARK: - Mistakes Block
 
 /// Lists timestamped mistake events, or a "no mistakes" message if empty.
-fileprivate struct MistakesBlock: View {
+private struct MistakesBlock: View {
     let exerciseName: String
     let mistakes: [MistakeEvent]
     let videoURL: URL?

@@ -35,7 +35,7 @@ struct EditProfileView: View {
 
                 Button(action: {
                     Task { await viewModel.save(using: profileService) }
-                }) {
+                }, label: {
                     Group {
                         if profileService.isSaving {
                             SwiftUI.ProgressView()
@@ -50,20 +50,20 @@ struct EditProfileView: View {
                     .background(Color.yellow)
                     .foregroundColor(.black)
                     .cornerRadius(14)
-                }
+                })
                 .buttonStyle(.plain)
                 .disabled(profileService.isSaving)
 
                 Button(action: {
                     authService.signOut()
                     dismiss()
-                }) {
+                }, label: {
                     Text("Sign out")
                         .font(.body)
                         .frame(maxWidth: .infinity)
                         .frame(height: 52)
                         .foregroundColor(.red)
-                }
+                })
                 .buttonStyle(.plain)
                 .padding(.bottom, 32)
             }
@@ -96,7 +96,7 @@ struct EditProfileView: View {
 // MARK: - Profile Text Field
 
 /// Styled text field with a label, supporting both text and numeric keyboard types.
-fileprivate struct ProfileTextField: View {
+private struct ProfileTextField: View {
     let title: String
     @Binding var text: String
     var isNumber: Bool

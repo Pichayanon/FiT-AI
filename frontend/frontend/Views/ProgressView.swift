@@ -21,9 +21,9 @@ struct ProgressView: View {
             .refreshable { await viewModel.load() }
             .task { await viewModel.load() }
     }
-    
+
     // MARK: - Weekly Chart Section
-    
+
     private var weeklyChartSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Calories Burned This Week")
@@ -54,7 +54,7 @@ struct ProgressView: View {
             }
             .chartYScale(domain: 0...300)
             .chartXAxis {
-                AxisMarks(values: .stride(by: .day)) { value in
+                AxisMarks(values: .stride(by: .day)) { _ in
                     AxisGridLine()
                     AxisValueLabel(format: .dateTime.weekday(.narrow))
                 }
@@ -64,9 +64,9 @@ struct ProgressView: View {
             .cornerRadius(12)
         }
     }
-    
+
     // MARK: - Summary Section
-    
+
     private var summarySection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Workout Summary")
@@ -111,9 +111,9 @@ struct ProgressView: View {
             }
         }
     }
-    
+
     // MARK: - History Section
-    
+
     private var historySection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("History")
@@ -177,7 +177,7 @@ struct ProgressView: View {
             }
         }
     }
-    
+
     /// Extracts a URL from an error message (e.g., Firestore index creation link).
     private func urlFromError(_ err: String) -> URL? {
         guard let start = err.range(of: "https://")?.lowerBound else { return nil }
@@ -404,7 +404,6 @@ private struct HistoryExerciseCard: View {
                     }
                 }
             }
-
         }
         .padding(16)
         .background(Color.white.opacity(0.06))

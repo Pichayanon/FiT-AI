@@ -121,7 +121,7 @@ struct WorkoutSessionView: View {
                 onBackToHome?()
             }
         }
-        .onChange(of: viewModel.feedback) { oldValue, newValue in
+        .onChange(of: viewModel.feedback) { _, _ in
             viewModel.handleFeedbackChange()
         }
         .onReceive(wallSitTick) { _ in
