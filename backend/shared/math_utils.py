@@ -1,11 +1,6 @@
-"""
-Shared math utility functions for pose analysis.
-
-Provides angle computation, position normalization, distance calculation, and other
-geometric utilities used across all exercise feature extractors.
-"""
-
 from __future__ import annotations
+
+from typing import Any
 
 import numpy as np
 
@@ -15,16 +10,6 @@ def angle_from_points(
     point_b: np.ndarray,
     point_c: np.ndarray,
 ) -> float:
-    """Compute the angle ABC (in degrees) from 2D or 3D points.
-
-    Args:
-        point_a: First point (vertex of the angle is at point_b).
-        point_b: Vertex point.
-        point_c: Third point.
-
-    Returns:
-        Angle in degrees (0 to 180).
-    """
     point_a_array = np.array(point_a, dtype=np.float32)
     point_b_array = np.array(point_b, dtype=np.float32)
     point_c_array = np.array(point_c, dtype=np.float32)
@@ -36,16 +21,31 @@ def angle_from_points(
 
 
 def safe_norm(vector: np.ndarray, eps: float = 1e-6) -> float:
-    """Compute the L2 norm of a vector with a small epsilon for stability.
-
-    Args:
-        vector: Input vector.
-        eps: Small constant added to prevent division by zero.
-
-    Returns:
-        L2 norm plus eps.
-    """
     return float(np.sqrt(np.sum(vector * vector)) + eps)
+
+
+def angle_to_direction(vector: np.ndarray, direction: np.ndarray) -> float:
+    vector_array = np.asarray(vector, dtype=np.float32)
+    direction_array = np.asarray(direction, dtype=np.float32)
+    denominator = safe_norm(vector_array) * safe_norm(direction_array) + 1e-6
+    cosine_angle = np.clip(
+        np.dot(vector_array, direction_array) / denominator,
+        -1.0,
+        1.0,
+    )
+    return float(np.degrees(np.arccos(cosine_angle)))
+
+
+def pick_scale(
+    *candidates: float,
+    min_scale: float = 1e-4,
+    fallback: float = 1.0,
+) -> float:
+    for candidate in candidates:
+        candidate_value = float(candidate)
+        if candidate_value > min_scale:
+            return candidate_value
+    return float(fallback)
 
 
 def position_normalize(
@@ -54,21 +54,6 @@ def position_normalize(
     scale: float | np.ndarray = 0.5,
     eps: float = 1e-6,
 ) -> float | np.ndarray:
-    """Normalize a single x/y value or array of positions.
-
-    Uses the shared `(value - center) / scale` convention that appears across
-    the pose feature extractors. Defaults map MediaPipe-style image coordinates
-    from `[0, 1]` into roughly `[-1, 1]`.
-
-    Args:
-        value: Position value(s) to normalize.
-        center: Reference center to subtract before scaling.
-        scale: Reference scale used to normalize the offset.
-        eps: Small constant added to prevent division by zero.
-
-    Returns:
-        Normalized value(s) with the same scalar/array shape.
-    """
     value_arr = np.asarray(value, dtype=np.float32)
     center_arr = np.asarray(center, dtype=np.float32)
     scale_arr = np.asarray(scale, dtype=np.float32)
@@ -80,27 +65,10 @@ def position_normalize(
 
 
 def point_distance(point_a: np.ndarray, point_b: np.ndarray) -> float:
-    """Compute Euclidean distance between two points.
-
-    Args:
-        point_a: First point.
-        point_b: Second point.
-
-    Returns:
-        Euclidean distance.
-    """
     return float(np.sqrt(np.sum((point_a - point_b) ** 2)))
 
 
 def landmarks_to_xyz(landmarks: list) -> np.ndarray:
-    """Extract (33, 3) xyz coordinates from MediaPipe landmarks.
-
-    Args:
-        landmarks: MediaPipe landmark list (33 landmarks).
-
-    Returns:
-        Array of shape (33, 3) with x, y, z coordinates.
-    """
     xyz_coordinates = np.zeros((33, 3), dtype=np.float32)
     for index in range(33):
         xyz_coordinates[index, 0] = landmarks[index].x
@@ -109,7 +77,43 @@ def landmarks_to_xyz(landmarks: list) -> np.ndarray:
     return xyz_coordinates
 
 
-# Backward-compatible aliases while the rest of the codebase is being renamed.
+def as_xyz_frame(landmarks: Any) -> np.ndarray:
+    if isinstance(landmarks, np.ndarray):
+        landmark_array = np.asarray(landmarks, dtype=np.float32)
+        if (
+            landmark_array.ndim != 2
+            or landmark_array.shape[0] != 33
+            or landmark_array.shape[1] < 3
+        ):
+            raise ValueError("Expected landmark frame with shape (33, 3/4).")
+        return landmark_array[:, :3].astype(np.float32)
+    return landmarks_to_xyz(landmarks)
+
+
+def as_xy_frame(landmarks: Any) -> np.ndarray:
+    if isinstance(landmarks, np.ndarray):
+        landmark_array = np.asarray(landmarks, dtype=np.float32)
+        if (
+            landmark_array.ndim != 2
+            or landmark_array.shape[0] != 33
+            or landmark_array.shape[1] < 2
+        ):
+            raise ValueError("Expected landmark frame with shape (33, 2/3/4).")
+        return landmark_array[:, :2].astype(np.float32)
+    return landmarks_to_xyz(landmarks)[:, :2]
+
+
+def as_xyz_sequence(landmark_sequence: np.ndarray) -> np.ndarray:
+    landmark_array = np.asarray(landmark_sequence, dtype=np.float32)
+    if (
+        landmark_array.ndim != 3
+        or landmark_array.shape[1] != 33
+        or landmark_array.shape[2] < 3
+    ):
+        raise ValueError("Expected landmark sequence with shape (T, 33, 3/4).")
+    return landmark_array[..., :3].astype(np.float32)
+
+
 angle_3pts = angle_from_points
 dist = point_distance
 get_xyz = landmarks_to_xyz

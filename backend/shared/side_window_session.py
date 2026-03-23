@@ -1,11 +1,3 @@
-"""Shared side-view sliding-window session helpers.
-
-Used by exercises like plank and wall sit that:
-1. require a side-view gate,
-2. buffer per-frame features into a fixed-size window, and
-3. run a sklearn classifier on the aggregated window.
-"""
-
 from __future__ import annotations
 
 import json
@@ -25,8 +17,6 @@ from shared.status_sender import StatusSender
 
 
 class SideWindowSession(BaseWebSocketSession):
-    """Base session for side-view buffered classifiers."""
-
     def __init__(
         self,
         websocket: WebSocket,
@@ -86,7 +76,6 @@ class SideWindowSession(BaseWebSocketSession):
         )
 
     async def _on_connected(self) -> None:
-        """Send common boot info after the WebSocket is accepted."""
         await self.status_sender.send_info(self.websocket, "WebSocket connected")
         print(
             f"[BOOT] side_mode={self.side_mode} VIS_TH={self.vis_th} "
@@ -104,18 +93,15 @@ class SideWindowSession(BaseWebSocketSession):
 
     @property
     def _initial_status(self) -> str:
-        """Buffered side-view sessions idle in their NO_POSE phase."""
         return self.phase_no_pose
 
     async def _on_stop(self) -> None:
-        """Reset gating/buffering state when the session stops."""
         self._reset_gate_and_buffers(reset_watchdog=True)
 
     def _reset_gate_specific_fields(self) -> None:
-        """Hook for subclasses with extra gate-related state."""
+        pass
 
     def _reset_gate_and_buffers(self, reset_watchdog: bool) -> None:
-        """Reset gate state, feature buffers, and optionally watchdogs."""
         self.state.frame_features.clear()
         self.state.ready = False
         self.state.ready_streak = 0
@@ -140,7 +126,6 @@ class SideWindowSession(BaseWebSocketSession):
         window_fill: int,
         extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Build the common payload shape used by buffered sessions."""
         payload: Dict[str, Any] = {
             "chosen_side": chosen_side,
             "window_fill": window_fill,
@@ -155,21 +140,18 @@ class SideWindowSession(BaseWebSocketSession):
         landmarks: Any,
         chosen_side: str,
     ) -> Optional[Dict[str, Any]]:
-        """Optional exercise-specific pose gate before ready/buffering."""
         return None
 
     def _on_missing_features(self) -> None:
-        """Hook for subclasses that need extra resets on feature failure."""
+        pass
 
     def _pre_buffer_feature_payload(
         self,
         frame_features: Any,
     ) -> Optional[Dict[str, Any]]:
-        """Optional exercise-specific gate before buffering/inference."""
         return None
 
     async def _handle_frame(self, data: Dict[str, Any]) -> None:
-        """Process one frame through the shared side-window pipeline."""
         if not self.state.started:
             return
 
@@ -263,8 +245,10 @@ class SideWindowSession(BaseWebSocketSession):
                 force=True,
             )
 
-        if (not self.model_service.loaded) or (not self.state.ready) or (
-            self.state.chosen_side is None
+        if (
+            (not self.model_service.loaded)
+            or (not self.state.ready)
+            or (self.state.chosen_side is None)
         ):
             await self.status_sender.send_status(
                 self.websocket,
@@ -293,9 +277,7 @@ class SideWindowSession(BaseWebSocketSession):
             )
             return
 
-        feature_gate_payload = self._pre_buffer_feature_payload(
-            frame_features
-        )
+        feature_gate_payload = self._pre_buffer_feature_payload(frame_features)
         if feature_gate_payload is not None:
             await self.status_sender.send_status(
                 self.websocket,
@@ -329,10 +311,8 @@ class SideWindowSession(BaseWebSocketSession):
             ),
         )
 
-        window_features = self.state.frame_features[-self.window_frames:]
-        aggregated_features = self.feature_extractor.aggregate_window(
-            window_features
-        )
+        window_features = self.state.frame_features[-self.window_frames :]
+        aggregated_features = self.feature_extractor.aggregate_window(window_features)
 
         predicted_id, prediction_confidence = self.model_service.predict(
             aggregated_features
@@ -360,5 +340,5 @@ class SideWindowSession(BaseWebSocketSession):
 
         if len(self.state.frame_features) > (self.window_frames + 60):
             self.state.frame_features = self.state.frame_features[
-                -(self.window_frames + 60):
+                -(self.window_frames + 60) :
             ]

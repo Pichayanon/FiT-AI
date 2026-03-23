@@ -1,5 +1,3 @@
-"""Plank WebSocket session handler."""
-
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -16,8 +14,6 @@ from plank.features import PlankFeatureExtractor, StreamState, is_plank_ready_po
 
 
 class PlankWebSocketSession(SideWindowSession):
-    """Handle a single plank WebSocket streaming session."""
-
     def __init__(
         self,
         websocket: WebSocket,
@@ -45,9 +41,7 @@ class PlankWebSocketSession(SideWindowSession):
         phase_inferencing: str,
         status_send_every_n_frames: int,
     ) -> None:
-        self.plank_ready_max_body_axis_angle_deg = (
-            plank_ready_max_body_axis_angle_deg
-        )
+        self.plank_ready_max_body_axis_angle_deg = plank_ready_max_body_axis_angle_deg
         self.plank_ready_max_torso_angle_deg = plank_ready_max_torso_angle_deg
         self.plank_ready_max_leg_angle_deg = plank_ready_max_leg_angle_deg
         super().__init__(
@@ -75,7 +69,6 @@ class PlankWebSocketSession(SideWindowSession):
         )
 
     def _create_state(self) -> StreamState:
-        """Return a fresh StreamState; base will set started=True and session_id."""
         return StreamState()
 
     def _pre_ready_pose_payload(
@@ -83,7 +76,6 @@ class PlankWebSocketSession(SideWindowSession):
         landmarks: Any,
         chosen_side: str,
     ) -> Optional[Dict[str, Any]]:
-        """Keep buffering disabled until the user is in a plank-like pose."""
         is_plank_pose_ready, posture_debug = is_plank_ready_pose(
             landmarks,
             chosen_side,

@@ -1,27 +1,3 @@
-"""
-squat_streaming.py — Squat form analysis streaming backend.
-
-Real-time squat analysis with front-view gate, phase detection (eccentric/concentric),
-bottom-event TCN classification, and standing posture TCN assessment.
-
-Key features:
-    - Front-view gate (FrontViewGateDynamic): validates body visibility and separation
-    - Phase TCN: detects eccentric/concentric phases from train_squat_phase
-    - Bottom TCN: classifies form at eccentric-to-concentric transition
-    - Stand TCN: evaluates standing posture before first rep
-
-WS protocol (from iOS):
-    {"type":"start"}
-    {"type":"frame","jpeg_b64":"..."}
-    {"type":"stop"}
-
-Server -> iOS:
-    {"type":"status","state":"waiting|warming_up|ready|predicting", ...}
-    {"type":"phase","phase":"eccentric|concentric|unknown", ...}
-    {"type":"result","mode":"bottom|stand","prediction":"...", ...}
-    {"type":"info","message":"..."}
-"""
-
 from __future__ import annotations
 
 if __package__ in {None, ""}:
@@ -51,11 +27,6 @@ from squat.session import (
     SquatWebSocketSession,
 )
 
-
-# ---------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------
-
 _DIR = os.path.dirname(__file__)
 TCN_MODEL_PATH = os.path.join(_DIR, "models", "squat_bottom_tcn.pt")
 STAND_MODEL_PATH = os.path.join(_DIR, "models", "squat_stand_tcn.pt")
@@ -63,10 +34,9 @@ PHASE_MODEL_PATH = os.path.join(_DIR, "models", "squat_phase_tcn.pt")
 
 PRE_FRAMES = 5
 POST_FRAMES = 5
-MIN_GAP = 18  # min frames between bottom events
-PHASE_DECISION_MODE = "last_logits"  # "last_logits" | "majority_vote"
+MIN_GAP = 18
+PHASE_DECISION_MODE = "last_logits"
 
-# Stand gate thresholds
 STAND_KNEE_ANGLE_DEG_TH = 160.0
 STAND_KNEE_DELTA_MAX_DEG = 5.0
 
@@ -94,21 +64,11 @@ STAND_WIN_FRAMES = PRE_FRAMES + POST_FRAMES + 1
 STAND_OK_LABELS = {"good_stand"}
 GOAL_GOOD_REPS = 5
 
-
 PHASE_LABELS = {0: "eccentric", 1: "concentric"}
 
 pose_module = mp.solutions.pose
 
-# ---------------------------------------------------------------
-# FastAPI Application
-# ---------------------------------------------------------------
-
 app = make_app("FiT-AI Squat Streaming Backend")
-
-
-# ---------------------------------------------------------------
-# Shared service instances
-# ---------------------------------------------------------------
 
 model_service = SquatModelService(TCN_MODEL_PATH, STAND_MODEL_PATH, PHASE_MODEL_PATH)
 front_view_gate = FrontViewGateDynamic(
@@ -120,13 +80,8 @@ front_view_gate = FrontViewGateDynamic(
 status_sender = StatusSender(STATUS_SEND_EVERY_N_FRAMES, PHASE_SEND_EVERY_N_FRAMES)
 
 
-# ---------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------
-
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    """Health check endpoint with model and configuration details."""
     return {
         "status": "ok",
         "stand_feature_dim": STAND_FEATURE_DIM,
@@ -147,15 +102,8 @@ def health() -> Dict[str, Any]:
     }
 
 
-
-
-# ---------------------------------------------------------------
-# WebSocket route
-# ---------------------------------------------------------------
-
 @app.websocket("/ws/video")
 async def ws_video(websocket: WebSocket) -> None:
-    """WebSocket endpoint for squat streaming sessions."""
     session = SquatWebSocketSession(
         websocket=websocket,
         model_service=model_service,
@@ -182,10 +130,6 @@ async def ws_video(websocket: WebSocket) -> None:
     )
     await session.run()
 
-
-# ---------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------
 
 if __name__ == "__main__":
     serve(app, port=5051)

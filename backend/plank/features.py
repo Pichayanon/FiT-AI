@@ -1,22 +1,17 @@
-"""Shared plank feature extraction helpers.
-
-Used by both training and streaming so plank feature computation stays
-consistent across offline and realtime paths.
-"""
-
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 import numpy as np
 
 from shared.math_utils import (
     angle_from_points,
-    landmarks_to_xyz,
+    as_xyz_frame,
+    pick_scale,
     point_distance,
     position_normalize,
 )
-
 
 LEFT_SHOULDER_INDEX = 11
 RIGHT_SHOULDER_INDEX = 12
@@ -25,17 +20,20 @@ RIGHT_HIP_INDEX = 24
 LEFT_ANKLE_INDEX = 27
 RIGHT_ANKLE_INDEX = 28
 
+FrameFeatures = tuple[float, float, float]
 
-def _side_indices(side: str) -> Tuple[int, int, int]:
-    """Return shoulder/hip/ankle landmark indices for the chosen side."""
+
+def side_indices(side: str) -> tuple[int, int, int]:
     if side == "right":
         return RIGHT_SHOULDER_INDEX, RIGHT_HIP_INDEX, RIGHT_ANKLE_INDEX
     return LEFT_SHOULDER_INDEX, LEFT_HIP_INDEX, LEFT_ANKLE_INDEX
 
 
-def _angle_from_horizontal_deg(a_xy: np.ndarray, b_xy: np.ndarray) -> float:
-    """Return the segment angle relative to horizontal in the range [0, 90]."""
-    delta = np.asarray(b_xy, dtype=np.float32) - np.asarray(a_xy, dtype=np.float32)
+def horizontal_angle(start_xy: np.ndarray, end_xy: np.ndarray) -> float:
+    delta = np.asarray(end_xy, dtype=np.float32) - np.asarray(
+        start_xy,
+        dtype=np.float32,
+    )
     angle_deg = abs(float(np.degrees(np.arctan2(delta[1], delta[0]))))
     if angle_deg > 90.0:
         angle_deg = 180.0 - angle_deg
@@ -43,50 +41,31 @@ def _angle_from_horizontal_deg(a_xy: np.ndarray, b_xy: np.ndarray) -> float:
 
 
 def choose_visible_side(landmarks: list) -> str:
-    """Select the body side with the more visible hip landmark."""
     right_hip_visibility = landmarks[RIGHT_HIP_INDEX].visibility
     left_hip_visibility = landmarks[LEFT_HIP_INDEX].visibility
     return "right" if right_hip_visibility > left_hip_visibility else "left"
 
 
-def extract_posture_metrics(landmarks: list, side: str) -> Dict[str, float]:
-    """Extract orientation metrics used to gate plank-ready posture.
+def extract_posture_metrics(landmarks: list, side: str) -> dict[str, float]:
+    frame_xyz = as_xyz_frame(landmarks)
+    shoulder_index, hip_index, ankle_index = side_indices(side)
 
-    The model features are intentionally translation/scale normalized, which makes
-    them poor at separating an upright body from a horizontal plank. These metrics
-    preserve image-space orientation so realtime inference only runs once the body
-    is sufficiently horizontal.
-    """
-    landmark_xyz = landmarks_to_xyz(landmarks)
-    shoulder_index, hip_index, ankle_index = _side_indices(side)
+    shoulder = frame_xyz[shoulder_index]
+    hip = frame_xyz[hip_index]
+    ankle = frame_xyz[ankle_index]
 
-    selected_shoulder = landmark_xyz[shoulder_index]
-    selected_hip = landmark_xyz[hip_index]
-    selected_ankle = landmark_xyz[ankle_index]
-
-    torso_angle = _angle_from_horizontal_deg(
-        selected_shoulder[:2],
-        selected_hip[:2],
-    )
-    leg_angle = _angle_from_horizontal_deg(
-        selected_hip[:2],
-        selected_ankle[:2],
-    )
-    body_axis_angle = _angle_from_horizontal_deg(
-        selected_shoulder[:2],
-        selected_ankle[:2],
-    )
-    torso_dx = abs(float(selected_shoulder[0] - selected_hip[0]))
-    torso_dy = abs(float(selected_shoulder[1] - selected_hip[1]))
-    leg_dx = abs(float(selected_ankle[0] - selected_hip[0]))
-    leg_dy = abs(float(selected_ankle[1] - selected_hip[1]))
+    torso_angle = horizontal_angle(shoulder[:2], hip[:2])
+    leg_angle = horizontal_angle(hip[:2], ankle[:2])
+    body_axis_angle = horizontal_angle(shoulder[:2], ankle[:2])
+    torso_dx = abs(float(shoulder[0] - hip[0]))
+    torso_dy = abs(float(shoulder[1] - hip[1]))
+    leg_dx = abs(float(ankle[0] - hip[0]))
+    leg_dy = abs(float(ankle[1] - hip[1]))
     body_x_span = float(
-        max(selected_shoulder[0], selected_hip[0], selected_ankle[0])
-        - min(selected_shoulder[0], selected_hip[0], selected_ankle[0])
+        max(shoulder[0], hip[0], ankle[0]) - min(shoulder[0], hip[0], ankle[0])
     )
     body_y_span = float(
-        max(selected_shoulder[1], selected_hip[1], selected_ankle[1])
-        - min(selected_shoulder[1], selected_hip[1], selected_ankle[1])
+        max(shoulder[1], hip[1], ankle[1]) - min(shoulder[1], hip[1], ankle[1])
     )
 
     return {
@@ -111,8 +90,7 @@ def is_plank_ready_pose(
     min_body_horizontal_ratio: float = 1.15,
     min_torso_horizontal_ratio: float = 0.75,
     min_leg_horizontal_ratio: float = 0.75,
-) -> Tuple[bool, Dict[str, float]]:
-    """Check whether the body is horizontal enough to start plank inference."""
+) -> tuple[bool, dict[str, float]]:
     metrics = extract_posture_metrics(landmarks, side)
     is_ready = (
         metrics["body_axis_angle_deg"] <= max_body_axis_angle_deg
@@ -139,56 +117,46 @@ def is_plank_ready_pose(
 def extract_frame_features(
     landmarks: list,
     side: str,
-) -> Tuple[float, float, float]:
-    """Extract normalized plank features from one landmark frame.
+) -> FrameFeatures:
+    frame_xyz = as_xyz_frame(landmarks)
 
-    The selected shoulder, hip, and ankle are first normalized in xyz space
-    relative to the chosen-side hip. The resulting features are:
-        - hip_signed_dist: signed hip distance from shoulder-ankle line
-        - hip_height_norm: hip vertical offset from shoulder/ankle midpoint
-        - body_angle: shoulder-hip-ankle angle in degrees
-    """
-    landmark_xyz = landmarks_to_xyz(landmarks)
+    shoulder_index, hip_index, ankle_index = side_indices(side)
 
-    shoulder_index, hip_index, ankle_index = _side_indices(side)
+    shoulder = frame_xyz[shoulder_index]
+    hip = frame_xyz[hip_index]
+    ankle = frame_xyz[ankle_index]
 
-    selected_shoulder = landmark_xyz[shoulder_index]
-    selected_hip = landmark_xyz[hip_index]
-    selected_ankle = landmark_xyz[ankle_index]
-
-    torso_length = point_distance(selected_shoulder, selected_hip)
-    body_length = point_distance(selected_shoulder, selected_ankle)
+    torso_length = point_distance(shoulder, hip)
+    body_length = point_distance(shoulder, ankle)
     hip_width = point_distance(
-        landmark_xyz[LEFT_HIP_INDEX],
-        landmark_xyz[RIGHT_HIP_INDEX],
+        frame_xyz[LEFT_HIP_INDEX],
+        frame_xyz[RIGHT_HIP_INDEX],
     )
     shoulder_width = point_distance(
-        landmark_xyz[LEFT_SHOULDER_INDEX],
-        landmark_xyz[RIGHT_SHOULDER_INDEX],
+        frame_xyz[LEFT_SHOULDER_INDEX],
+        frame_xyz[RIGHT_SHOULDER_INDEX],
     )
-    reference_scale = torso_length
-    if reference_scale <= 1e-4:
-        reference_scale = body_length
-    if reference_scale <= 1e-4:
-        reference_scale = hip_width
-    if reference_scale <= 1e-4:
-        reference_scale = shoulder_width
-    if reference_scale <= 1e-4:
-        reference_scale = 1e-6
+    reference_scale = pick_scale(
+        torso_length,
+        body_length,
+        hip_width,
+        shoulder_width,
+        fallback=1e-6,
+    )
 
     normalized_shoulder = position_normalize(
-        selected_shoulder,
-        center=selected_hip,
+        shoulder,
+        center=hip,
         scale=reference_scale,
     )
     normalized_hip = position_normalize(
-        selected_hip,
-        center=selected_hip,
+        hip,
+        center=hip,
         scale=reference_scale,
     )
     normalized_ankle = position_normalize(
-        selected_ankle,
-        center=selected_hip,
+        ankle,
+        center=hip,
         scale=reference_scale,
     )
 
@@ -196,12 +164,12 @@ def extract_frame_features(
     normalized_hip_xy = normalized_hip[:2]
     normalized_ankle_xy = normalized_ankle[:2]
 
-    shoulder_to_ankle_vector = normalized_ankle_xy - normalized_shoulder_xy
-    shoulder_to_hip_vector = normalized_hip_xy - normalized_shoulder_xy
-    hip_signed_dist = np.cross(
-        shoulder_to_ankle_vector,
-        shoulder_to_hip_vector,
-    ) / (np.linalg.norm(shoulder_to_ankle_vector) + 1e-6)
+    shoulder_to_ankle = normalized_ankle_xy - normalized_shoulder_xy
+    shoulder_to_hip = normalized_hip_xy - normalized_shoulder_xy
+    hip_signed_dist = (
+        shoulder_to_ankle[0] * shoulder_to_hip[1]
+        - shoulder_to_ankle[1] * shoulder_to_hip[0]
+    ) / (np.linalg.norm(shoulder_to_ankle) + 1e-6)
 
     body_angle = angle_from_points(
         normalized_shoulder,
@@ -221,21 +189,11 @@ def extract_frame_features(
 
 
 def aggregate_window_features(
-    frame_values: List[Tuple[float, float, float]],
+    frame_values: list[FrameFeatures],
 ) -> np.ndarray:
-    """Aggregate per-frame tuples into the model's 6-D plank feature vector.
-
-    Feature order:
-        [0] mean hip signed distance
-        [1] std hip signed distance
-        [2] mean hip height offset
-        [3] std hip height offset
-        [4] mean body angle
-        [5] std body angle
-    """
-    hip_signed_distances = [frame_value[0] for frame_value in frame_values]
-    hip_height_offsets = [frame_value[1] for frame_value in frame_values]
-    body_angles = [frame_value[2] for frame_value in frame_values]
+    hip_signed_distances = [hip_signed_dist for hip_signed_dist, _, _ in frame_values]
+    hip_height_offsets = [hip_height for _, hip_height, _ in frame_values]
+    body_angles = [body_angle for _, _, body_angle in frame_values]
 
     return np.array(
         [
@@ -250,16 +208,7 @@ def aggregate_window_features(
     )
 
 
-# ---------------------------------------------------------------
-# Feature extractor (streaming adapter)
-# ---------------------------------------------------------------
-
-from typing import Any, Optional
-
-
 class PlankFeatureExtractor:
-    """Adapter that wraps plank feature helpers for use in the streaming session."""
-
     def __init__(self, mp_pose: Any) -> None:
         self.mp_pose = mp_pose
 
@@ -267,70 +216,49 @@ class PlankFeatureExtractor:
         self,
         pose_result: Any,
         side: str,
-    ) -> Optional[Tuple[float, float, float]]:
-        """Extract a single-frame feature tuple for the given side."""
+    ) -> Optional[FrameFeatures]:
         if not pose_result.pose_landmarks:
             return None
         return extract_frame_features(pose_result.pose_landmarks.landmark, side)
 
     @staticmethod
     def aggregate_window(
-        frame_features: List[Tuple[float, float, float]],
+        frame_features: list[FrameFeatures],
     ) -> np.ndarray:
-        """Aggregate a window of per-frame tuples into a 6-D feature vector."""
         return aggregate_window_features(frame_features)
 
 
-# Backward-compatible alias
 FeatureExtractor = PlankFeatureExtractor
-
-
-# ---------------------------------------------------------------
-# Stream state
-# ---------------------------------------------------------------
-
-from dataclasses import dataclass, field
 
 
 @dataclass
 class StreamState:
-    """Session-level state for a plank streaming WebSocket connection."""
-
     started: bool = False
-    # Per-frame features: (signed_dist, hip_height_norm, body_angle)
-    frame_features: List[Tuple[float, float, float]] = field(default_factory=list)
 
-    # Gate
+    frame_features: list[FrameFeatures] = field(default_factory=list)
+
     ready: bool = False
     ready_streak: int = 0
     chosen_side: Optional[str] = None
 
-    # Session metadata
     session_id: str = ""
 
-    # Status throttle
     last_status: str = ""
     status_tick: int = 0
 
-    # Last prediction (for logs / debugging)
     last_prediction_label: str = ""
     last_prediction_confidence: Optional[float] = None
 
-    # Last sent (for optional deduplication)
     last_sent_label: str = ""
     last_sent_confidence: Optional[float] = None
 
-    # Frame counter
     frame_count: int = 0
 
-    # NO_POSE watchdog
     no_pose_since: Optional[float] = None
     no_pose_alerted: bool = False
 
-    # DARK watchdog
     dark_since: Optional[float] = None
     dark_alerted: bool = False
 
 
-# Backward-compatible alias for older imports.
 aggregate_window = aggregate_window_features

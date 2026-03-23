@@ -1,15 +1,3 @@
-"""
-train_squat_bottom.py – Train TCN for bottom-phase squat classification.
-
-Labels: good_squat | knee_ins | round_back | not_deep_enough
-Feature set: 41 dims/frame (30 xyz + 7 angles + 4 width ratios)
-
-Usage:
-  python squat/train_squat_bottom.py \
-    --data dataset/squat/dataset_bottom \
-    --out  squat/models/squat_bottom_tcn.pt
-"""
-
 from __future__ import annotations
 
 if __package__ in {None, ""}:
@@ -23,6 +11,7 @@ import argparse
 from shared.training_utils import NPZDataset, run_bottom_training
 from squat.features import BOTTOM_FEATURE_DIM, extract_bottom_features
 
+
 def build_squat_dataset(samples, label_map, window_size):
     return NPZDataset(
         samples,
@@ -32,7 +21,13 @@ def build_squat_dataset(samples, label_map, window_size):
         BOTTOM_FEATURE_DIM,
     )
 
-_FEAT_DETAIL = {"key_joint_xyz": 30, "angles": 7, "width_ratios": 4, "total": BOTTOM_FEATURE_DIM}
+
+_FEAT_DETAIL = {
+    "key_joint_xyz": 30,
+    "angles": 7,
+    "width_ratios": 4,
+    "total": BOTTOM_FEATURE_DIM,
+}
 
 
 def main() -> None:

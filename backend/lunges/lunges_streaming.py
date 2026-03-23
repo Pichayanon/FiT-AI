@@ -1,27 +1,3 @@
-"""
-lunges_streaming.py — Lunge form analysis streaming backend.
-
-Real-time lunge analysis with side-view visibility gate, phase detection
-(eccentric/concentric), bottom-event TCN classification, and depth gating.
-
-Key features:
-    - Side-view gate (SideViewGateDynamic): validates body landmark visibility
-    - Phase TCN: detects eccentric/concentric phases
-    - Bottom TCN: classifies form at eccentric-to-concentric transition
-    - Depth gate: ignores triggers when knee angle is too high
-
-WS protocol (from iOS):
-    {"type":"start"}
-    {"type":"frame","jpeg_b64":"..."}
-    {"type":"stop"}
-
-Server -> iOS:
-    {"type":"status","state":"waiting|warming_up|ready|predicting", ...}
-    {"type":"phase","phase":"eccentric|concentric|unknown", ...}
-    {"type":"result","mode":"bottom","prediction":"...", ...}
-    {"type":"info","message":"..."}
-"""
-
 from __future__ import annotations
 
 if __package__ in {None, ""}:
@@ -47,23 +23,16 @@ from lunges.session import (
     LungeWebSocketSession,
 )
 
-
-# ---------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------
-
 _DIR = os.path.dirname(__file__)
 BOTTOM_MODEL_PATH = os.path.join(_DIR, "models", "lunges_bottom_tcn.pt")
 PHASE_MODEL_PATH = os.path.join(_DIR, "models", "lunge_phase_tcn.pt")
 
 PRE_FRAMES = 15
 POST_FRAMES = 15
-MIN_GAP = 18  # min frames between bottom events
+MIN_GAP = 18
 
-# Depth Gate: knee angle threshold (degrees)
 GATE_KNEE_ANGLE = 130.0
 
-# Visibility
 VIS_TH = 0.65
 
 READY_STREAK_N = 3
@@ -83,29 +52,15 @@ DEBUG = False
 
 pose_module = mp.solutions.pose
 
-# ---------------------------------------------------------------
-# FastAPI Application
-# ---------------------------------------------------------------
-
 app = make_app("FiT-AI Lunges Streaming Backend")
-
-
-# ---------------------------------------------------------------
-# Shared service instances
-# ---------------------------------------------------------------
 
 model_service = LungeModelService(BOTTOM_MODEL_PATH, PHASE_MODEL_PATH)
 side_view_gate = SideViewGateDynamic(pose_module, VIS_TH)
 status_sender = StatusSender(STATUS_SEND_EVERY_N_FRAMES, PHASE_SEND_EVERY_N_FRAMES)
 
 
-# ---------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------
-
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    """Health check endpoint with model and configuration details."""
     return {
         "status": "ok",
         "bottom_feature_dim": BOTTOM_FEATURE_DIM,
@@ -119,15 +74,8 @@ def health() -> Dict[str, Any]:
     }
 
 
-
-
-# ---------------------------------------------------------------
-# WebSocket route
-# ---------------------------------------------------------------
-
 @app.websocket("/ws/video")
 async def ws_video(websocket: WebSocket) -> None:
-    """WebSocket endpoint for lunge streaming sessions."""
     session = LungeWebSocketSession(
         websocket=websocket,
         model_service=model_service,
@@ -148,10 +96,6 @@ async def ws_video(websocket: WebSocket) -> None:
     )
     await session.run()
 
-
-# ---------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------
 
 if __name__ == "__main__":
     serve(app, port=5053)

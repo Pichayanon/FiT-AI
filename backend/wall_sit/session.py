@@ -1,5 +1,3 @@
-"""Wall sit WebSocket session handler."""
-
 from __future__ import annotations
 
 from typing import Dict, Optional, Tuple
@@ -16,8 +14,6 @@ from wall_sit.features import WallSitFeatureExtractor, StreamState
 
 
 class WallSitWebSocketSession(SideWindowSession):
-    """Handle a single wall sit WebSocket streaming session."""
-
     def __init__(
         self,
         websocket: WebSocket,
@@ -71,22 +67,18 @@ class WallSitWebSocketSession(SideWindowSession):
         )
 
     def _create_state(self) -> StreamState:
-        """Return a fresh StreamState for the current session."""
         return StreamState()
 
     def _reset_gate_specific_fields(self) -> None:
-        """Reset wall-sit specific gating state."""
         self.state.stand_streak = 0
 
     def _on_missing_features(self) -> None:
-        """Reset stand streak when frame features are unavailable."""
         self.state.stand_streak = 0
 
     def _pre_buffer_feature_payload(
         self,
         frame_features: Tuple[float, float, float],
     ) -> Optional[Dict[str, object]]:
-        """Keep inference disabled while the user is still standing upright."""
         knee_angle = float(frame_features[1])
         if knee_angle >= self.stand_knee_angle_deg_th:
             self.state.stand_streak += 1

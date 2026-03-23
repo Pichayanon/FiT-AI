@@ -1,23 +1,9 @@
-"""
-Front-view visibility gate for exercises requiring frontal camera angle.
-
-Used by squat to verify that the user is positioned facing the camera
-with sufficient landmark visibility and left-right body separation.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
 
 class FrontViewGateDynamic:
-    """Front-view gate: visibility check plus left-right body separation.
-
-    Ensures that both sides of the body are visible and that
-    shoulders and hips show sufficient horizontal separation
-    (indicating a front-facing view).
-    """
-
     def __init__(
         self,
         mp_pose: Any,
@@ -25,20 +11,11 @@ class FrontViewGateDynamic:
         min_sho_gap: float,
         min_hip_gap: float,
     ) -> None:
-        """Initialize the front view gate.
-
-        Args:
-            mp_pose: MediaPipe pose solutions module (mp.solutions.pose).
-            vis_th: Minimum visibility threshold for required landmarks.
-            min_sho_gap: Minimum horizontal gap between left/right shoulders.
-            min_hip_gap: Minimum horizontal gap between left/right hips.
-        """
         self.mp_pose = mp_pose
         self.vis_th = vis_th
         self.min_sho_gap = min_sho_gap
         self.min_hip_gap = min_hip_gap
 
-        # Build landmark lists from the passed mp_pose module
         self.FRONT_LM: List[int] = [
             mp_pose.PoseLandmark.LEFT_SHOULDER,
             mp_pose.PoseLandmark.RIGHT_SHOULDER,
@@ -62,14 +39,6 @@ class FrontViewGateDynamic:
         }
 
     def evaluate(self, landmarks: List[Any]) -> Tuple[bool, Dict[str, Any]]:
-        """Check if the front-view gate passes.
-
-        Args:
-            landmarks: MediaPipe landmark list.
-
-        Returns:
-            Tuple of (gate_passes, debug_info_dict).
-        """
         visibility_by_landmark: Dict[str, float] = {}
         visibility_ok = True
         for idx in self.FRONT_LM:

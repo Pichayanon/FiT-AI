@@ -1,42 +1,17 @@
-"""
-Side-view visibility gate for dynamic exercises requiring lateral camera angle.
-
-Used by lunges to verify that the user's full body (legs + upper body)
-is sufficiently visible before processing begins. Unlike the existing
-SideGate (used by plank/wall_sit for left/right side selection), this
-gate simply checks overall visibility for dynamic side-view exercises.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
 
 class SideViewGateDynamic:
-    """Side-view visibility gate for dynamic exercises (e.g., lunges).
-
-    Checks that:
-        - All leg landmarks (hips, knees, ankles) are visible
-        - At least one shoulder is visible (upper body)
-
-    Returns (ok, debug) tuple matching FrontViewGateDynamic interface.
-    """
-
     def __init__(
         self,
         mp_pose: Any,
         vis_th: float = 0.65,
     ) -> None:
-        """Initialize the side-view dynamic gate.
-
-        Args:
-            mp_pose: MediaPipe pose solutions module (mp.solutions.pose).
-            vis_th: Minimum visibility threshold for required landmarks.
-        """
         self.mp_pose = mp_pose
         self.vis_th = vis_th
 
-        # Required: all leg landmarks must be visible
         self.LEG_LM: List[int] = [
             mp_pose.PoseLandmark.LEFT_HIP,
             mp_pose.PoseLandmark.RIGHT_HIP,
@@ -46,7 +21,6 @@ class SideViewGateDynamic:
             mp_pose.PoseLandmark.RIGHT_ANKLE,
         ]
 
-        # Required: at least one shoulder must be visible
         self.SHOULDER_LM: List[int] = [
             mp_pose.PoseLandmark.LEFT_SHOULDER,
             mp_pose.PoseLandmark.RIGHT_SHOULDER,
@@ -76,26 +50,13 @@ class SideViewGateDynamic:
         }
 
     def evaluate(self, landmarks: Any) -> Tuple[bool, Dict[str, Any]]:
-        """Check if the side-view visibility gate passes.
-
-        Accepts either MediaPipe landmark list or numpy array (N, 4)
-        where column 3 is visibility.
-
-        Args:
-            landmarks: MediaPipe landmark list or numpy array of shape (33, 4).
-
-        Returns:
-            Tuple of (gate_passes, debug_info_dict).
-        """
         import numpy as np
 
-        # Support both MediaPipe landmarks and numpy arrays
         is_numpy_array = isinstance(landmarks, np.ndarray)
 
         visibility_by_landmark: Dict[str, float] = {}
         fail_reason = ""
 
-        # Check legs
         legs_ok = True
         for idx in self.LEG_LM:
             visibility = (
@@ -112,7 +73,6 @@ class SideViewGateDynamic:
                 if not fail_reason:
                     fail_reason = "Legs/Feet not visible"
 
-        # Check shoulders (at least one)
         sho_ok = False
         for idx in self.SHOULDER_LM:
             visibility = (

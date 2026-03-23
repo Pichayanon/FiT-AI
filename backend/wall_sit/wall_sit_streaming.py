@@ -1,23 +1,3 @@
-"""
-wall_sit_streaming.py — Wall Sit posture analysis streaming backend.
-
-WebSocket streaming server for real-time wall sit form assessment using
-side-view pose detection and sklearn-based classification.
-
-Phases sent to iOS:
-    NO_POSE, HAVE_POSE, BUFFERING, INFERENCING
-
-WS protocol (from iOS):
-    {"type":"start"}
-    {"type":"frame","jpeg_b64":"..."}
-    {"type":"stop"}
-
-Server -> iOS:
-    {"type":"status","state":"NO_POSE|HAVE_POSE|BUFFERING|INFERENCING", ...}
-    {"type":"result","prediction":"...", "confidence":..., ...}
-    {"type":"info","message":"..."}
-"""
-
 from __future__ import annotations
 
 if __package__ in {None, ""}:
@@ -52,11 +32,6 @@ from shared.status_sender import StatusSender
 from wall_sit.features import WallSitFeatureExtractor
 from wall_sit.session import WallSitWebSocketSession
 
-
-# ---------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------
-
 _DIR = os.path.dirname(__file__)
 MODEL_PATH = os.path.join(_DIR, "models", "wall_sit_model.pkl")
 
@@ -68,52 +43,34 @@ LABELS: Dict[int, str] = {
     4: "not_deep_enough",
 }
 
-WINDOW_FRAMES = 15          # frames per inference window
-READY_STREAK_N = 3          # consecutive side-view frames required
-VIS_TH = 0.80               # side landmark visibility threshold
+WINDOW_FRAMES = 15
+READY_STREAK_N = 3
+VIS_TH = 0.80
 
 DEBUG = False
 
-# MediaPipe confidence thresholds
 MP_MIN_DET_CONF = 0.80
 MP_MIN_TRACK_CONF = 0.80
 
-# Status message throttle
 STATUS_SEND_EVERY_N_FRAMES = 3
 
-# Side selection: "auto" | "left" | "right"
 SIDE_MODE = "auto"
 
-# Status phase constants
 PHASE_NO_POSE = "NO_POSE"
 PHASE_HAVE_POSE = "HAVE_POSE"
 PHASE_BUFFERING = "BUFFERING"
 PHASE_INFERENCING = "INFERENCING"
 
-# NO_POSE watchdog: alert after this many seconds of no pose
 NO_POSE_ADJUST_SECONDS = 5.0
 
-# DARK watchdog: alert after this many seconds of dark frames
 DARK_ADJUST_SECONDS = 5.0
-# Mean grayscale brightness threshold (0..255)
+
 DARK_BRIGHTNESS_TH = 55.0
 
-# Standing gate: avoid predicting while user stands upright
-# knee_angle ~ 165-180 degrees = standing (not in wall-sit yet)
 STAND_KNEE_ANGLE_DEG_TH = 165.0
 STAND_STREAK_N = 3
 
-
-# ---------------------------------------------------------------
-# FastAPI Application
-# ---------------------------------------------------------------
-
 app = make_app("FiT-AI WallSit Streaming Backend")
-
-
-# ---------------------------------------------------------------
-# Shared service instances
-# ---------------------------------------------------------------
 
 model_service = SklearnModelService(MODEL_PATH)
 label_mapper = LabelMapper(LABELS)
@@ -125,13 +82,8 @@ feature_extractor = WallSitFeatureExtractor(mp_pose=pose_module)
 status_sender = StatusSender(every_n_frames=STATUS_SEND_EVERY_N_FRAMES)
 
 
-# ---------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------
-
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    """Health check endpoint with server configuration details."""
     return {
         "status": "ok",
         "model_loaded": model_service.loaded,
@@ -151,7 +103,6 @@ def health() -> Dict[str, Any]:
 
 @app.websocket("/ws/video")
 async def ws_video(websocket: WebSocket) -> None:
-    """WebSocket endpoint for wall sit streaming sessions."""
     session = WallSitWebSocketSession(
         websocket=websocket,
         model_service=model_service,
@@ -179,10 +130,6 @@ async def ws_video(websocket: WebSocket) -> None:
     )
     await session.run()
 
-
-# ---------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------
 
 if __name__ == "__main__":
     serve("wall_sit.wall_sit_streaming:app", port=5050)

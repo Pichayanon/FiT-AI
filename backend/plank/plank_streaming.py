@@ -1,26 +1,3 @@
-"""
-plank_streaming.py — Plank posture analysis streaming backend.
-
-WebSocket streaming server for real-time plank form assessment using
-side-view pose detection and sklearn-based classification.
-
-Phases sent to iOS:
-    NO_POSE, HAVE_POSE, BUFFERING, INFERENCING
-
-WS protocol (from iOS):
-    {"type":"start"}
-    {"type":"frame","jpeg_b64":"..."}
-    {"type":"stop"}
-
-Server -> iOS:
-    {"type":"status","state":"NO_POSE|HAVE_POSE|BUFFERING|INFERENCING", ...}
-    {"type":"result","prediction":"...", "confidence":..., ...}
-    {"type":"info","message":"..."}
-
-Run (from backend/):
-    python plank/plank_streaming.py --serve
-"""
-
 from __future__ import annotations
 
 if __package__ in {None, ""}:
@@ -53,11 +30,6 @@ from shared.status_sender import StatusSender
 from plank.features import PlankFeatureExtractor
 from plank.session import PlankWebSocketSession
 
-
-# ---------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------
-
 PLANK_DIR = os.path.dirname(__file__)
 MODEL_PATH = os.path.join(PLANK_DIR, "models", "plank_model.pkl")
 
@@ -67,52 +39,35 @@ LABELS: Dict[int, str] = {
     2: "hips_too_low",
 }
 
-WINDOW_FRAMES = 15          # frames per inference window
-READY_STREAK_N = 3          # consecutive side-view frames required
-VIS_TH = 0.80               # side landmark visibility threshold
+WINDOW_FRAMES = 15
+READY_STREAK_N = 3
+VIS_TH = 0.80
 
 DEBUG = False
 
-# MediaPipe confidence thresholds
 MP_MIN_DET_CONF = 0.80
 MP_MIN_TRACK_CONF = 0.80
 
-# Status message throttle
 STATUS_SEND_EVERY_N_FRAMES = 3
 
-# Side selection: "auto" | "left" | "right"
 SIDE_MODE = "auto"
 
-# Status phase constants
 PHASE_NO_POSE = "NO_POSE"
 PHASE_HAVE_POSE = "HAVE_POSE"
 PHASE_BUFFERING = "BUFFERING"
 PHASE_INFERENCING = "INFERENCING"
 
-# NO_POSE watchdog: alert after this many seconds of no pose
 NO_POSE_ADJUST_SECONDS = 5.0
 
-# DARK watchdog: alert after this many seconds of dark frames
 DARK_ADJUST_SECONDS = 3.0
-# Mean grayscale brightness threshold (0..255)
+
 DARK_BRIGHTNESS_TH = 55.0
 
-# Plank-ready posture gate: keep inference off until the body is horizontal enough
 PLANK_READY_MAX_BODY_AXIS_ANGLE_DEG = 35.0
 PLANK_READY_MAX_TORSO_ANGLE_DEG = 45.0
 PLANK_READY_MAX_LEG_ANGLE_DEG = 45.0
 
-
-# ---------------------------------------------------------------
-# FastAPI Application
-# ---------------------------------------------------------------
-
 app = make_app("FiT-AI Plank Streaming Backend")
-
-
-# ---------------------------------------------------------------
-# Shared service instances
-# ---------------------------------------------------------------
 
 model_service = SklearnModelService(MODEL_PATH)
 label_mapper = LabelMapper(LABELS)
@@ -124,13 +79,8 @@ feature_extractor = PlankFeatureExtractor(mp_pose=pose_module)
 status_sender = StatusSender(every_n_frames=STATUS_SEND_EVERY_N_FRAMES)
 
 
-# ---------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------
-
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    """Health check endpoint with server configuration details."""
     return {
         "status": "ok",
         "model_loaded": model_service.loaded,
@@ -153,7 +103,6 @@ def health() -> Dict[str, Any]:
 
 @app.websocket("/ws/video")
 async def ws_video(websocket: WebSocket) -> None:
-    """WebSocket endpoint for plank streaming sessions."""
     session = PlankWebSocketSession(
         websocket=websocket,
         model_service=model_service,
@@ -182,10 +131,6 @@ async def ws_video(websocket: WebSocket) -> None:
     )
     await session.run()
 
-
-# ---------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------
 
 if __name__ == "__main__":
     serve(app, port=5052)

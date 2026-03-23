@@ -1,15 +1,3 @@
-"""
-train_squat_stand.py – Train TCN for squat standing-stance classification.
-
-Labels: good_stand | stand_too_narrow | stand_too_wide
-Feature set: 16 dims/frame (4 width ratios + 6 X-positions + 3 angles + extras)
-
-Usage:
-  python squat/train_squat_stand.py \
-    --data dataset/squat/dataset_standing \
-    --out  squat/models/squat_stand_tcn.pt
-"""
-
 from __future__ import annotations
 
 if __package__ in {None, ""}:
@@ -23,6 +11,7 @@ import argparse
 from shared.training_utils import NPZDataset, run_bottom_training
 from squat.features import STAND_FEATURE_DIM, extract_stand_features
 
+
 def build_standing_dataset(samples, label_map, window_size):
     return NPZDataset(
         samples,
@@ -32,9 +21,14 @@ def build_standing_dataset(samples, label_map, window_size):
         STAND_FEATURE_DIM,
     )
 
+
 _FEAT_DETAIL = {
-    "width_ratios": 4, "x_positions": 6, "angles": 3,
-    "distances": 2, "feet_over_shoulder": 1, "total": STAND_FEATURE_DIM,
+    "width_ratios": 4,
+    "x_positions": 6,
+    "angles": 3,
+    "distances": 2,
+    "feet_over_shoulder": 1,
+    "total": STAND_FEATURE_DIM,
 }
 
 

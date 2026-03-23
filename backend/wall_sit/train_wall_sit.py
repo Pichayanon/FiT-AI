@@ -24,13 +24,9 @@ from sklearn.preprocessing import StandardScaler
 
 from wall_sit.features import aggregate_window_features, extract_frame_features
 
-# -----------------------------
-# Config
-# -----------------------------
+
 @dataclass(frozen=True)
 class WallSitConfig:
-    """Configuration for wall-sit training."""
-
     base_dir: str
     label_map: Dict[int, str]
     test_size: float = 0.3
@@ -56,15 +52,10 @@ DATASET = WallSitConfig(
     },
 )
 
-# -----------------------------
-# Utils
-# -----------------------------
 mp_pose = mp.solutions.pose
 
 
 class WallSitFeatureExtractor:
-    """Encapsulates wall-sit feature extraction from a single video."""
-
     def __init__(self) -> None:
         self._pose = mp_pose.Pose()
 
@@ -99,8 +90,6 @@ class WallSitFeatureExtractor:
 
 
 class WallSitTrainer:
-    """High-level trainer that builds dataset, trains, evaluates and saves the model."""
-
     def __init__(self, config: WallSitConfig, max_iter: int) -> None:
         self.config = config
         self.max_iter = max_iter
@@ -170,12 +159,10 @@ class WallSitTrainer:
         )
         model.fit(X_train, y_train)
 
-        # Train accuracy
         y_train_pred = model.predict(X_train)
         train_acc = accuracy_score(y_train, y_train_pred)
         print(f"[TRAIN] Accuracy: {train_acc:.4f}")
 
-        # Validation metrics
         print("\n[VAL] Evaluating on validation set...")
         y_pred = model.predict(X_val)
         acc = accuracy_score(y_val, y_pred)
@@ -203,10 +190,7 @@ class WallSitTrainer:
         for i, label_idx in enumerate(unique_labels):
             class_name = self.config.label_map[label_idx]
             cls_acc = cm_diag[i] / cm_sum[i] if cm_sum[i] > 0 else 0.0
-            print(
-                f"  {class_name:<20}: {cls_acc:.4f} "
-                f"({cm_diag[i]}/{cm_sum[i]})"
-            )
+            print(f"  {class_name:<20}: {cls_acc:.4f} " f"({cm_diag[i]}/{cm_sum[i]})")
 
         print(f"\n[VAL] Overall Accuracy: {acc:.4f}")
 
@@ -228,9 +212,7 @@ class WallSitTrainer:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Train Wall Sit Classification Model"
-    )
+    parser = argparse.ArgumentParser(description="Train Wall Sit Classification Model")
     parser.add_argument(
         "--epochs",
         type=int,

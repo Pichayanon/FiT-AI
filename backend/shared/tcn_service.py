@@ -1,10 +1,3 @@
-"""
-TCN model loading and prediction service.
-
-Provides functions to load TCN checkpoints and run predictions,
-used by squat and lunges streaming backends.
-"""
-
 from __future__ import annotations
 
 import re
@@ -20,7 +13,6 @@ from .video_utils import resample_time
 def _get_simple_tcn_config(
     checkpoint: Dict[str, Any],
 ) -> Tuple[Tuple[int, ...], float, bool]:
-    """Extract SimpleTCN architecture config from checkpoint metadata."""
     metadata = checkpoint.get("meta", {})
     state_dict = checkpoint.get("model_state") or checkpoint.get("state_dict") or {}
 
@@ -47,28 +39,21 @@ def _get_simple_tcn_config(
     if isinstance(use_attention_meta, bool):
         use_attention = use_attention_meta
     else:
-        use_attention = "attention.weight" in state_dict or "attention.bias" in state_dict
+        use_attention = (
+            "attention.weight" in state_dict or "attention.bias" in state_dict
+        )
 
     return channels, dropout, use_attention
 
 
-def load_sequence_tcn(path: str) -> Tuple[
+def load_sequence_tcn(
+    path: str,
+) -> Tuple[
     Optional[SimpleTCN],
     Optional[int],
     Optional[Dict[int, str]],
     Optional[int],
 ]:
-    """Load a SimpleTCN checkpoint.
-
-    Expected checkpoint keys: in_dim, T, label_map, model_state.
-
-    Args:
-        path: Path to the .pt checkpoint file.
-
-    Returns:
-        Tuple of (model, T, inv_labels, in_dim).
-        All None if loading fails.
-    """
     try:
         checkpoint = torch.load(path, map_location="cpu")
         input_dim = int(checkpoint["in_dim"])
@@ -91,7 +76,7 @@ def load_sequence_tcn(path: str) -> Tuple[
             f"use_attention={use_attention}"
         )
         return model, target_window_size, inverse_label_map, input_dim
-    except Exception as e:  # pylint: disable=broad-except
+    except Exception as e:
         print(f"[MODEL] Cannot load: {path} err={e}")
         return None, None, None, None
 
@@ -99,17 +84,6 @@ def load_sequence_tcn(path: str) -> Tuple[
 def load_phase_tcn(
     path: str,
 ) -> Tuple[Optional[PhaseTCN], Optional[int], Optional[int]]:
-    """Load a PhaseTCN checkpoint for phase prediction.
-
-    Expected checkpoint keys: state_dict, in_dim, num_classes, window.
-
-    Args:
-        path: Path to the .pt checkpoint file.
-
-    Returns:
-        Tuple of (model, window_size, in_dim).
-        All None if loading fails.
-    """
     try:
         checkpoint = torch.load(path, map_location="cpu")
         in_dim = int(checkpoint.get("in_dim", 10))
@@ -123,7 +97,7 @@ def load_phase_tcn(
             f"in_dim={in_dim} window={window_size} num_classes={num_classes}"
         )
         return model, window_size, in_dim
-    except Exception as e:  # pylint: disable=broad-except
+    except Exception as e:
         print(f"[MODEL] Cannot load phase TCN: {path} err={e}")
         return None, None, None
 
@@ -134,20 +108,6 @@ def predict_sequence_tcn(
     target_t: int,
     feature_window: np.ndarray,
 ) -> Tuple[str, float, np.ndarray]:
-    """Run prediction with a SimpleTCN model.
-
-    Resamples the input window to the model's expected time dimension,
-    runs inference, and returns the predicted label with confidence.
-
-    Args:
-        model: Loaded SimpleTCN model.
-        inv_labels: Mapping from class index to label string.
-        target_t: Target time dimension for resampling.
-        feature_window: Input feature window of shape (T_raw, D).
-
-    Returns:
-        Tuple of (predicted_label, confidence, probability_array).
-    """
     resampled_feature_window = resample_time(
         feature_window.astype(np.float32),
         int(target_t),
@@ -165,6 +125,5 @@ def predict_sequence_tcn(
     return predicted_label, confidence, probabilities
 
 
-# Backward-compatible aliases while callers are migrated.
 load_tcn = load_sequence_tcn
 tcn_predict = predict_sequence_tcn

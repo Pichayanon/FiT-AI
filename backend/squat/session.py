@@ -1,5 +1,3 @@
-"""Squat WebSocket session handler."""
-
 from __future__ import annotations
 
 import json
@@ -25,7 +23,12 @@ from shared.front_view_gate_dynamic import FrontViewGateDynamic
 from squat.features import (
     BOTTOM_FEATURE_DIM,
     STAND_FEATURE_DIM,
-    L_HIP, R_HIP, L_KNE, R_KNE, L_ANK, R_ANK,
+    L_HIP,
+    R_HIP,
+    L_KNE,
+    R_KNE,
+    L_ANK,
+    R_ANK,
     extract_phase_features,
     extract_stand_features,
     extract_bottom_features,
@@ -33,8 +36,6 @@ from squat.features import (
 
 
 class SquatModelService(PhaseAwareTCNModelService):
-    """Load and serve squat bottom, stand, and phase TCN models."""
-
     def __init__(
         self,
         bottom_path: str,
@@ -48,19 +49,13 @@ class SquatModelService(PhaseAwareTCNModelService):
         )
 
 
-# ---------------------------------------------------------------
-# Stream State
-# ---------------------------------------------------------------
-
 @dataclass
 class StreamState(PhaseBottomStreamState):
-    """Session state for squat streaming."""
-
     last_phase: str = "stand"
 
     stand_streak: int = 0
     previous_knee_angle: Optional[float] = None
-    last_stand_prediction_frame: int = -10**9
+    last_stand_prediction_frame: int = -(10**9)
     stand_checked_once: bool = False
     stand_ok: bool = False
 
@@ -70,13 +65,7 @@ class StreamState(PhaseBottomStreamState):
     phase_features: deque = field(default_factory=lambda: deque(maxlen=35))
 
 
-# ---------------------------------------------------------------
-# Squat WebSocket Session
-# ---------------------------------------------------------------
-
 class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
-    """Handle a single squat WebSocket streaming session."""
-
     def __init__(
         self,
         websocket: WebSocket,
@@ -85,7 +74,6 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
         status_sender: StatusSender,
         ready_streak_n: int,
         debug: bool,
-        # Configuration constants from squat_streaming.py
         bottom_feature_dim: int,
         stand_feature_dim: int,
         stand_ok_labels: set,
@@ -110,7 +98,6 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
         self.ready_streak_n = ready_streak_n
         self.debug = debug
 
-        # Store configuration
         self.bottom_feature_dim = bottom_feature_dim
         self.stand_feature_dim = stand_feature_dim
         self.stand_ok_labels = stand_ok_labels
@@ -138,19 +125,20 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
             min_tracking_confidence=mp_min_track_conf,
         )
 
-    # ---------------------------------------------------------------
-    # Connection hook (replaces duplicated run() boilerplate)
-    # ---------------------------------------------------------------
-
     async def _on_connected(self) -> None:
-        """Send dimension warnings and welcome message after ws.accept()."""
-        if self.model_service.bottom_loaded and self.bottom_feature_dim != self.model_service.bottom_in_dim:
+        if (
+            self.model_service.bottom_loaded
+            and self.bottom_feature_dim != self.model_service.bottom_in_dim
+        ):
             await self.status_sender.send_info(
                 self.websocket,
                 f"WARNING: Bottom model in_dim={self.model_service.bottom_in_dim} "
                 f"but extractor gives dim={self.bottom_feature_dim}",
             )
-        if self.model_service.stand_loaded and self.stand_feature_dim != self.model_service.stand_in_dim:
+        if (
+            self.model_service.stand_loaded
+            and self.stand_feature_dim != self.model_service.stand_in_dim
+        ):
             await self.status_sender.send_info(
                 self.websocket,
                 f"WARNING: Stand model in_dim={self.model_service.stand_in_dim} "
@@ -171,22 +159,15 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
             },
         )
 
-    # ---------------------------------------------------------------
-    # State factory and hooks (implement BaseWebSocketSession contract)
-    # ---------------------------------------------------------------
-
     def _create_state(self) -> StreamState:
-        """Return a fresh StreamState; base will set started=True and session_id."""
         return StreamState(
             history=deque(maxlen=self.pre_frames + self.post_frames + 240)
         )
 
     async def _on_start(self) -> None:
-        """Reset the frame counter for the new session."""
         self.frame_index = 0
 
     def _stop_extra(self) -> Dict[str, Any]:
-        """Include rep counts and stand result in the stop payload."""
         return {
             "reps": {
                 "total": int(self.state.total_reps),
@@ -197,41 +178,26 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
             "stand_ok": bool(self.state.stand_ok),
         }
 
-    # ---------------------------------------------------------------
-    # Helpers
-    # ---------------------------------------------------------------
-
     def _reset_buffers(self) -> None:
-        """Reset all tracking buffers and streaks (used on gate failure or ready transition)."""
         self._reset_phase_bottom_state()
         self.state.last_sent_stand_label = ""
 
     def _after_full_buffer_reset(self) -> None:
-        """Reset squat-specific tracking fields on gate failure."""
         self.state.stand_streak = 0
         self.state.previous_knee_angle = None
 
     def _after_ready_transition(self) -> None:
-        """Reset the knee-angle tracker when the front gate first locks in."""
         self.state.previous_knee_angle = None
 
     def _bottom_feature_from_history_record(self, record: Any) -> np.ndarray:
-        """Return the bottom-model feature vector from a squat history tuple."""
         return record[2]
 
-    # ---------------------------------------------------------------
-    # Frame handler
-    # ---------------------------------------------------------------
-
     async def _handle_frame(self, data: Dict[str, Any]) -> None:
-        """Process a single video frame through the full squat pipeline."""
-        # Step 1: Decode frame
         frame = FrameDecoder.decode_jpeg_base64(data.get("jpeg_b64", ""))
         if frame is None:
             await self.status_sender.send_info(self.websocket, "Decode failed")
             return
 
-        # Step 2: Check brightness and run pose detection
         too_dark, brightness_mean = FrameQuality.is_too_dark(
             frame,
             self.dark_brightness_th,
@@ -240,7 +206,6 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
         image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pose_result = self.pose.process(image_rgb)
 
-        # Step 3: Handle no pose
         if not pose_result.pose_landmarks:
             self._reset_buffers()
             await self._send_waiting_status(
@@ -250,7 +215,6 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
             self.frame_index += 1
             return
 
-        # Step 4: Front-view gate check
         landmarks = pose_result.pose_landmarks.landmark
         front_view_ok, gate_debug = self.gate.evaluate(landmarks)
         self.state.last_gate_debug = gate_debug
@@ -266,7 +230,6 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
             self.frame_index += 1
             return
 
-        # Step 5: Track ready streak
         if not await self._advance_ready_streak(
             gate_debug=gate_debug,
             ok_message="Front View OK",
@@ -274,7 +237,6 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
             self.frame_index += 1
             return
 
-        # Step 6: Extract features and compute knee angle
         left_hip_xy = (landmarks[L_HIP].x, landmarks[L_HIP].y)
         right_hip_xy = (landmarks[R_HIP].x, landmarks[R_HIP].y)
         left_knee_xy = (landmarks[L_KNE].x, landmarks[L_KNE].y)
@@ -289,7 +251,6 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
         )
         knee_angle = float((left_knee_angle + right_knee_angle) * 0.5)
 
-        # Stand gate
         is_standing = knee_angle >= self.stand_knee_angle_deg_th
         self.state.previous_knee_angle = knee_angle
         if is_standing:
@@ -300,9 +261,11 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
         stand_features = extract_stand_features(landmarks)
         bottom_features = extract_bottom_features(landmarks)
 
-        # Step 7: Phase detection
         self.state.phase_features.append(extract_phase_features(landmarks))
-        if self.model_service.phase_loaded and len(self.state.phase_features) >= self.model_service.phase_window:
+        if (
+            self.model_service.phase_loaded
+            and len(self.state.phase_features) >= self.model_service.phase_window
+        ):
             phase = self.model_service.predict_phase(
                 np.array(self.state.phase_features),
                 decision_mode=self.phase_decision_mode,
@@ -311,7 +274,6 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
             phase = "unknown"
         await self.status_sender.send_phase(self.websocket, self.state, phase)
 
-        # Step 8: Detect bottom event (eccentric -> concentric transition)
         event_frame = None
         if phase == "concentric" and self.state.prev_phase == "eccentric":
             if self.frame_index - self.state.last_bottom_event_frame >= self.min_gap:
@@ -319,7 +281,6 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
                 self.state.last_bottom_event_frame = self.frame_index
         self.state.prev_phase = phase
 
-        # Add to history
         self.state.history.append(
             (
                 self.frame_index,
@@ -328,7 +289,6 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
             )
         )
 
-        # Step 9: Bottom prediction (immediate)
         if (
             event_frame is not None
             and self.model_service.bottom_loaded
@@ -336,10 +296,8 @@ class SquatWebSocketSession(PhaseBottomSessionMixin, BaseWebSocketSession):
         ):
             await self._predict_and_send_bottom(event_frame, phase)
 
-        # Step 10: Bottom prediction (pending — waiting for post-frames)
         await self._resolve_pending_bottom_prediction(phase)
 
-        # Step 11: Standing posture prediction (before first rep)
         stand_win_frames = self.pre_frames + self.post_frames + 1
         if (
             (self.state.total_reps == 0)

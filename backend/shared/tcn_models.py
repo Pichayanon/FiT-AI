@@ -1,14 +1,3 @@
-"""
-Shared TCN (Temporal Convolutional Network) model architectures.
-
-Provides the TemporalBlock and SimpleTCN used by squat and lunges
-for bottom/stand classification, plus PhaseTemporalBlock and PhaseTCN
-used for eccentric/concentric phase detection.
-
-These architectures match the training scripts exactly and are used
-by both training and inference code paths.
-"""
-
 from __future__ import annotations
 
 from typing import Tuple
@@ -18,12 +7,6 @@ import torch.nn as nn
 
 
 class TemporalBlock(nn.Module):
-    """Single temporal convolutional block with residual connection.
-
-    Matches the architecture used in train_squat_bottom.py,
-    train_squat_stand.py, and train_lunges_bottom.py.
-    """
-
     def __init__(
         self,
         in_ch: int,
@@ -46,9 +29,7 @@ class TemporalBlock(nn.Module):
         self.act2 = nn.ReLU()
         self.drop2 = nn.Dropout(dropout)
 
-        self.down = (
-            nn.Conv1d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else None
-        )
+        self.down = nn.Conv1d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else None
         self.pad = pad
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -66,15 +47,6 @@ class TemporalBlock(nn.Module):
 
 
 class SimpleTCN(nn.Module):
-    """Simple TCN classifier for temporal sequence classification.
-
-    Takes input of shape (B, T, D) and produces class logits (B, num_classes).
-    Supports both the current attention-pooling head and the legacy
-    AdaptiveAvgPool1d head used by older checkpoints.
-
-    Matches the architecture used in squat and lunge bottom/stand models.
-    """
-
     def __init__(
         self,
         in_dim: int,
@@ -101,25 +73,19 @@ class SimpleTCN(nn.Module):
         self.fc = nn.Linear(channels[-1], num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.transpose(1, 2)          # (B, T, D) -> (B, D, T)
-        y = self.tcn(x)                # (B, C, T)
+        x = x.transpose(1, 2)
+        y = self.tcn(x)
         if self.use_attention:
-            y = y.transpose(1, 2)      # (B, T, C)
-            scores = self.attention(y).squeeze(-1)          # (B, T)
-            weights = torch.softmax(scores, dim=-1)         # (B, T)
-            context = (y * weights.unsqueeze(-1)).sum(dim=1)  # (B, C)
+            y = y.transpose(1, 2)
+            scores = self.attention(y).squeeze(-1)
+            weights = torch.softmax(scores, dim=-1)
+            context = (y * weights.unsqueeze(-1)).sum(dim=1)
         else:
-            context = self.pool(y).squeeze(-1)              # (B, C)
+            context = self.pool(y).squeeze(-1)
         return self.fc(context)
 
 
 class PhaseTemporalBlock(nn.Module):
-    """Temporal block for phase TCN (no dropout variant).
-
-    Matches the architecture used in train_squat_phase.py for
-    frame-level phase prediction (eccentric/concentric).
-    """
-
     def __init__(
         self,
         in_ch: int,
@@ -143,12 +109,6 @@ class PhaseTemporalBlock(nn.Module):
 
 
 class PhaseTCN(nn.Module):
-    """Phase TCN for frame-level phase prediction.
-
-    Outputs per-frame class logits: (B, W, num_classes).
-    Matches the architecture used in train_squat_phase.py.
-    """
-
     def __init__(self, in_dim: int = 10, num_classes: int = 2) -> None:
         super().__init__()
         self.tcn = nn.Sequential(
@@ -159,7 +119,7 @@ class PhaseTCN(nn.Module):
         self.fc = nn.Conv1d(64, num_classes, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.transpose(1, 2)  # (B, W, F) -> (B, F, W)
+        x = x.transpose(1, 2)
         x = self.tcn(x)
         x = self.fc(x)
-        return x.transpose(1, 2)  # (B, W, C)
+        return x.transpose(1, 2)

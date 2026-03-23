@@ -1,11 +1,3 @@
-"""Shared helpers for phase-driven bottom-event sessions.
-
-Used by exercises like squat and lunges that:
-1. buffer per-frame features,
-2. detect bottom events from phase transitions, and
-3. classify the bottom event with a TCN model.
-"""
-
 from __future__ import annotations
 
 import json
@@ -13,29 +5,23 @@ from typing import Any, Dict
 
 import numpy as np
 
-
-_EVENT_SENTINEL = -10**9
+_EVENT_SENTINEL = -(10**9)
 
 
 class PhaseBottomSessionMixin:
-    """Mixin for phase-based bottom-event streaming sessions."""
-
     def _is_good_rep_label(self, pred_label: str) -> bool:
-        """Return True when the predicted bottom label counts as correct."""
         return pred_label.startswith("good")
 
     def _bottom_feature_from_history_record(self, record: Any) -> np.ndarray:
-        """Extract the bottom-model feature vector from one history record."""
         raise NotImplementedError
 
     def _after_full_buffer_reset(self) -> None:
-        """Hook for exercise-specific resets on gate failure / no-pose."""
+        pass
 
     def _after_ready_transition(self) -> None:
-        """Hook for exercise-specific resets when the gate becomes ready."""
+        pass
 
     def _reset_common_bottom_buffers(self) -> None:
-        """Clear shared bottom-event tracking buffers."""
         self.state.history.clear()
         self.state.phase_features.clear()
         self.state.prev_phase = ""
@@ -44,7 +30,6 @@ class PhaseBottomSessionMixin:
         self.state.last_sent_bottom_event_frame = _EVENT_SENTINEL
 
     def _reset_phase_bottom_state(self) -> None:
-        """Reset shared gate/buffer state after no-pose or gate failure."""
         self.state.ready = False
         self.state.ready_streak = 0
         self.state.last_gate_debug = {}
@@ -52,13 +37,11 @@ class PhaseBottomSessionMixin:
         self._after_full_buffer_reset()
 
     def _activate_ready_phase_bottom_state(self) -> None:
-        """Reset shared buffers when the user first satisfies the gate."""
         self.state.ready = True
         self._reset_common_bottom_buffers()
         self._after_ready_transition()
 
     def _increment_rep_counter(self, event_frame: int, pred_label: str) -> None:
-        """Count one rep per bottom event and split it into good/bad buckets."""
         if event_frame == self.state.last_counted_event_frame:
             return
         self.state.last_counted_event_frame = event_frame
@@ -76,7 +59,6 @@ class PhaseBottomSessionMixin:
         gate_debug: Dict[str, Any] | None = None,
         reason: str | None = None,
     ) -> None:
-        """Send the shared waiting payload used by squat/lunge sessions."""
         payload: Dict[str, Any] = {
             "ready_streak": 0,
             "needed_streak": self.ready_streak_n,
@@ -101,7 +83,6 @@ class PhaseBottomSessionMixin:
         gate_debug: Dict[str, Any],
         ok_message: str,
     ) -> bool:
-        """Advance ready streak and send the shared ready/warming statuses."""
         self.state.ready_streak += 1
 
         if (not self.state.ready) and (self.state.ready_streak >= self.ready_streak_n):
@@ -141,7 +122,6 @@ class PhaseBottomSessionMixin:
         phase: str,
         force: bool = False,
     ) -> None:
-        """Run bottom TCN prediction for one event and send the result."""
         start_frame = event_frame - self.pre_frames
         end_frame = event_frame + self.post_frames
         required_frame_count = self.pre_frames + self.post_frames + 1
@@ -216,7 +196,6 @@ class PhaseBottomSessionMixin:
             await self.websocket.send_text(json.dumps(payload))
 
     async def _resolve_pending_bottom_prediction(self, phase: str) -> None:
-        """Finalize pending bottom predictions once enough post-frames arrive."""
         if (
             self.state.pending_bottom_event is None
             or (not self.model_service.bottom_loaded)

@@ -19,10 +19,6 @@ from plank.features import (
     extract_frame_features,
 )
 
-
-# -----------------------------
-# Config
-# -----------------------------
 PLANK_DIR = os.path.dirname(__file__)
 
 BASE_DIR = os.path.join(
@@ -36,14 +32,11 @@ BASE_DIR = os.path.abspath(BASE_DIR)
 MODEL_DIR = os.path.join(PLANK_DIR, "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "plank_model.pkl")
 
-# Map numeric labels -> folder names under BASE_DIR
-# Adjust folders to match your actual dataset structure.
 DATASET = {
     0: "correct",
     1: "hips_too_high",
     2: "hips_too_low",
 }
-
 
 mp_pose = mp.solutions.pose
 
@@ -77,10 +70,6 @@ def extract_video_features(video_path: str):
     return aggregate_window_features(frame_features).tolist()
 
 
-
-# -----------------------------
-# Build Dataset
-# -----------------------------
 feature_matrix, label_array = [], []
 
 for label, folder in DATASET.items():
@@ -109,10 +98,6 @@ label_array = np.array(label_array, dtype=np.int64)
 print("Plank dataset shape:", feature_matrix.shape)
 print("Classes:", np.unique(label_array))
 
-
-# -----------------------------
-# Train model
-# -----------------------------
 model = Pipeline(
     [
         ("scaler", StandardScaler()),
