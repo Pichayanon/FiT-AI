@@ -127,7 +127,9 @@ jobs:
 
           # Init git repo and push to HF
           cd "$DEPLOY_DIR"
-          git init
+          git init -b main
+          git config user.email "ci@fit-ai.dev"
+          git config user.name "FiT-AI CI"
           git lfs install
           git lfs track "*.pt" "*.pkl"
           git add .
