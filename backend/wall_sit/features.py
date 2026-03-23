@@ -10,7 +10,12 @@ from typing import List, Tuple
 
 import numpy as np
 
-from shared.math_utils import angle_3pts, dist, get_xyz, position_normalize
+from shared.math_utils import (
+    angle_from_points,
+    landmarks_to_xyz,
+    point_distance,
+    position_normalize,
+)
 
 
 LEFT_SHOULDER_INDEX = 11
@@ -33,7 +38,7 @@ def extract_frame_features(landmarks: list, side: str) -> Tuple[float, float, fl
         - knee_angle_norm: hip-knee-ankle angle divided by 180
         - torso_alignment: horizontal shoulder offset from hip
     """
-    landmark_xyz = get_xyz(landmarks)
+    landmark_xyz = landmarks_to_xyz(landmarks)
 
     if side == "right":
         hip_index = RIGHT_HIP_INDEX
@@ -51,11 +56,11 @@ def extract_frame_features(landmarks: list, side: str) -> Tuple[float, float, fl
     selected_ankle = landmark_xyz[ankle_index]
     selected_shoulder = landmark_xyz[shoulder_index]
 
-    shoulder_width = dist(
+    shoulder_width = point_distance(
         landmark_xyz[LEFT_SHOULDER_INDEX],
         landmark_xyz[RIGHT_SHOULDER_INDEX],
     )
-    hip_width = dist(
+    hip_width = point_distance(
         landmark_xyz[LEFT_HIP_INDEX],
         landmark_xyz[RIGHT_HIP_INDEX],
     )
@@ -87,14 +92,14 @@ def extract_frame_features(landmarks: list, side: str) -> Tuple[float, float, fl
 
     foot_wall_norm = abs(normalized_ankle[0] - normalized_hip[0])
     knee_angle_norm = (
-        angle_3pts(normalized_hip, normalized_knee, normalized_ankle) / 180.0
+        angle_from_points(normalized_hip, normalized_knee, normalized_ankle) / 180.0
     )
     torso_alignment = abs(normalized_shoulder[0] - normalized_hip[0])
 
     return float(foot_wall_norm), float(knee_angle_norm), float(torso_alignment)
 
 
-def aggregate_window(
+def aggregate_window_features(
     frame_values: List[Tuple[float, float, float]],
 ) -> np.ndarray:
     """Aggregate per-frame tuples into the model's 5-D wall-sit feature vector.
@@ -120,3 +125,75 @@ def aggregate_window(
         ],
         dtype=np.float32,
     )
+
+
+# ---------------------------------------------------------------
+# Feature extractor (streaming adapter)
+# ---------------------------------------------------------------
+
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+
+class WallSitFeatureExtractor:
+    """Adapter that wraps wall-sit feature helpers for use in the streaming session."""
+
+    def __init__(self, mp_pose: Any) -> None:
+        self.mp_pose = mp_pose
+
+    def extract_features(
+        self,
+        pose_result: Any,
+        side: str,
+    ) -> Optional[Tuple[float, float, float]]:
+        """Extract a single-frame wall-sit feature tuple for the given side."""
+        if not pose_result.pose_landmarks:
+            return None
+        return extract_frame_features(pose_result.pose_landmarks.landmark, side)
+
+    @staticmethod
+    def aggregate_window(
+        frame_features: List[Tuple[float, float, float]],
+    ) -> np.ndarray:
+        """Aggregate a window of per-frame tuples into a 5-D feature vector."""
+        return aggregate_window_features(frame_features)
+
+
+# ---------------------------------------------------------------
+# Stream state
+# ---------------------------------------------------------------
+
+@dataclass
+class StreamState:
+    """Session-level state for a wall sit streaming WebSocket connection."""
+
+    started: bool = False
+    frame_features: List[Tuple[float, float, float]] = field(default_factory=list)
+    stand_streak: int = 0
+
+    ready: bool = False
+    ready_streak: int = 0
+    chosen_side: Optional[str] = None
+
+    session_id: str = ""
+
+    last_status: str = ""
+    status_tick: int = 0
+
+    last_prediction_label: str = ""
+    last_prediction_confidence: Optional[float] = None
+
+    last_sent_label: str = ""
+    last_sent_confidence: Optional[float] = None
+
+    frame_count: int = 0
+
+    no_pose_since: Optional[float] = None
+    no_pose_alerted: bool = False
+
+    dark_since: Optional[float] = None
+    dark_alerted: bool = False
+
+
+# Backward-compatible alias for older imports.
+aggregate_window = aggregate_window_features

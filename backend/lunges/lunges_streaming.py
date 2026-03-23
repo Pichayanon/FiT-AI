@@ -81,7 +81,7 @@ GOAL_GOOD_REPS = 5
 
 DEBUG = False
 
-mp_pose = mp.solutions.pose
+pose_module = mp.solutions.pose
 
 # ---------------------------------------------------------------
 # FastAPI Application
@@ -95,7 +95,7 @@ app = make_app("FiT-AI Lunges Streaming Backend")
 # ---------------------------------------------------------------
 
 model_service = LungeModelService(BOTTOM_MODEL_PATH, PHASE_MODEL_PATH)
-side_view_gate = SideViewGateDynamic(mp_pose, VIS_TH)
+side_view_gate = SideViewGateDynamic(pose_module, VIS_TH)
 status_sender = StatusSender(STATUS_SEND_EVERY_N_FRAMES, PHASE_SEND_EVERY_N_FRAMES)
 
 
@@ -130,9 +130,9 @@ async def ws_video(websocket: WebSocket) -> None:
     """WebSocket endpoint for lunge streaming sessions."""
     session = LungeWebSocketSession(
         websocket=websocket,
-        model_svc=model_service,
+        model_service=model_service,
         gate=side_view_gate,
-        status=status_sender,
+        status_sender=status_sender,
         ready_streak_n=READY_STREAK_N,
         debug=DEBUG,
         bottom_feature_dim=BOTTOM_FEATURE_DIM,

@@ -50,7 +50,7 @@ from shared.sklearn_model_service import SklearnModelService
 from shared.label_mapper import LabelMapper
 from shared.side_gate import SideGate
 from shared.status_sender import StatusSender
-from plank.feature_extractor import PlankFeatureExtractor
+from plank.features import PlankFeatureExtractor
 from plank.session import PlankWebSocketSession
 
 
@@ -117,9 +117,9 @@ app = make_app("FiT-AI Plank Streaming Backend")
 model_service = SklearnModelService(MODEL_PATH)
 label_mapper = LabelMapper(LABELS)
 
-mp_pose = mp.solutions.pose
-side_gate = SideGate(mp_pose=mp_pose, side_mode=SIDE_MODE, vis_th=VIS_TH)
-feature_extractor = PlankFeatureExtractor(mp_pose=mp_pose)
+pose_module = mp.solutions.pose
+side_gate = SideGate(mp_pose=pose_module, side_mode=SIDE_MODE, vis_th=VIS_TH)
+feature_extractor = PlankFeatureExtractor(mp_pose=pose_module)
 
 status_sender = StatusSender(every_n_frames=STATUS_SEND_EVERY_N_FRAMES)
 
@@ -156,11 +156,11 @@ async def ws_video(websocket: WebSocket) -> None:
     """WebSocket endpoint for plank streaming sessions."""
     session = PlankWebSocketSession(
         websocket=websocket,
-        model_svc=model_service,
+        model_service=model_service,
         gate=side_gate,
         feature_extractor=feature_extractor,
         labels=label_mapper,
-        status=status_sender,
+        status_sender=status_sender,
         window_frames=WINDOW_FRAMES,
         ready_streak_n=READY_STREAK_N,
         debug=DEBUG,

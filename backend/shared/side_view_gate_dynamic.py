@@ -75,14 +75,14 @@ class SideViewGateDynamic:
             mp_pose.PoseLandmark.RIGHT_SHOULDER: "R_SHO",
         }
 
-    def check(self, lm: Any) -> Tuple[bool, Dict[str, Any]]:
+    def evaluate(self, landmarks: Any) -> Tuple[bool, Dict[str, Any]]:
         """Check if the side-view visibility gate passes.
 
         Accepts either MediaPipe landmark list or numpy array (N, 4)
         where column 3 is visibility.
 
         Args:
-            lm: MediaPipe landmark list or numpy array of shape (33, 4).
+            landmarks: MediaPipe landmark list or numpy array of shape (33, 4).
 
         Returns:
             Tuple of (gate_passes, debug_info_dict).
@@ -90,17 +90,24 @@ class SideViewGateDynamic:
         import numpy as np
 
         # Support both MediaPipe landmarks and numpy arrays
-        is_np = isinstance(lm, np.ndarray)
+        is_numpy_array = isinstance(landmarks, np.ndarray)
 
-        vis_map: Dict[str, float] = {}
+        visibility_by_landmark: Dict[str, float] = {}
         fail_reason = ""
 
         # Check legs
         legs_ok = True
         for idx in self.LEG_LM:
-            v = float(lm[idx, 3]) if is_np else float(lm[idx].visibility)
-            vis_map[self.LM_LABELS.get(idx, str(idx))] = round(v, 3)
-            if v < self.vis_th:
+            visibility = (
+                float(landmarks[idx, 3])
+                if is_numpy_array
+                else float(landmarks[idx].visibility)
+            )
+            visibility_by_landmark[self.LM_LABELS.get(idx, str(idx))] = round(
+                visibility,
+                3,
+            )
+            if visibility < self.vis_th:
                 legs_ok = False
                 if not fail_reason:
                     fail_reason = "Legs/Feet not visible"
@@ -108,20 +115,35 @@ class SideViewGateDynamic:
         # Check shoulders (at least one)
         sho_ok = False
         for idx in self.SHOULDER_LM:
-            v = float(lm[idx, 3]) if is_np else float(lm[idx].visibility)
-            vis_map[self.LM_LABELS.get(idx, str(idx))] = round(v, 3)
-            if v >= self.vis_th:
+            visibility = (
+                float(landmarks[idx, 3])
+                if is_numpy_array
+                else float(landmarks[idx].visibility)
+            )
+            visibility_by_landmark[self.LM_LABELS.get(idx, str(idx))] = round(
+                visibility,
+                3,
+            )
+            if visibility >= self.vis_th:
                 sho_ok = True
 
         left_chain_ok = True
         right_chain_ok = True
         for idx in self.SIDE_LEG_CHAINS["left"]:
-            v = float(lm[idx, 3]) if is_np else float(lm[idx].visibility)
-            if v < self.vis_th:
+            visibility = (
+                float(landmarks[idx, 3])
+                if is_numpy_array
+                else float(landmarks[idx].visibility)
+            )
+            if visibility < self.vis_th:
                 left_chain_ok = False
         for idx in self.SIDE_LEG_CHAINS["right"]:
-            v = float(lm[idx, 3]) if is_np else float(lm[idx].visibility)
-            if v < self.vis_th:
+            visibility = (
+                float(landmarks[idx, 3])
+                if is_numpy_array
+                else float(landmarks[idx].visibility)
+            )
+            if visibility < self.vis_th:
                 right_chain_ok = False
 
         single_side_profile_ok = sho_ok and (left_chain_ok or right_chain_ok)
@@ -131,19 +153,19 @@ class SideViewGateDynamic:
         elif not legs_ok and single_side_profile_ok:
             fail_reason = "Single side profile visible"
 
-        ok = legs_ok and sho_ok
+        gate_ok = legs_ok and sho_ok
 
-        dbg: Dict[str, Any] = {
-            "vis_ok": ok,
+        debug_info: Dict[str, Any] = {
+            "vis_ok": gate_ok,
             "legs_ok": legs_ok,
             "sho_ok": sho_ok,
             "left_chain_ok": left_chain_ok,
             "right_chain_ok": right_chain_ok,
             "single_side_profile_ok": single_side_profile_ok,
             "vis_th": float(self.vis_th),
-            "vis": vis_map,
+            "vis": visibility_by_landmark,
         }
         if fail_reason:
-            dbg["reason"] = fail_reason
+            debug_info["reason"] = fail_reason
 
-        return ok, dbg
+        return gate_ok, debug_info

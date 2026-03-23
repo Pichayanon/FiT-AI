@@ -47,11 +47,11 @@ class SklearnModelService:
         """Return True if the model is loaded successfully."""
         return self.model is not None
 
-    def predict(self, feature_vector: np.ndarray) -> Tuple[int, Optional[float]]:
+    def predict(self, features: np.ndarray) -> Tuple[int, Optional[float]]:
         """Run prediction on a feature vector.
 
         Args:
-            feature_vector: Feature array. Will be reshaped to (1, -1) if needed.
+            features: Feature array. Will be reshaped to (1, -1) if needed.
 
         Returns:
             Tuple of (predicted_class_id, confidence_or_None).
@@ -61,7 +61,7 @@ class SklearnModelService:
         if self.model is None:
             return 0, None
 
-        feature_matrix = feature_vector.reshape(1, -1)
+        feature_matrix = features.reshape(1, -1)
         predicted_class_id = int(self.model.predict(feature_matrix)[0])
         confidence: Optional[float] = None
         if hasattr(self.model, "predict_proba"):

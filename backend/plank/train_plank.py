@@ -13,7 +13,11 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from plank.features import aggregate_window, choose_visible_side, extract_frame_features
+from plank.features import (
+    aggregate_window_features,
+    choose_visible_side,
+    extract_frame_features,
+)
 
 
 # -----------------------------
@@ -45,18 +49,18 @@ mp_pose = mp.solutions.pose
 
 
 def extract_video_features(video_path: str):
-    cap = cv2.VideoCapture(video_path)
-    pose = mp_pose.Pose()
+    capture = cv2.VideoCapture(video_path)
+    pose_detector = mp_pose.Pose()
 
     frame_features = []
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
+    while capture.isOpened():
+        frame_ok, frame = capture.read()
+        if not frame_ok:
             break
 
         image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        pose_result = pose.process(image_rgb)
+        pose_result = pose_detector.process(image_rgb)
         if not pose_result.pose_landmarks:
             continue
 
@@ -64,13 +68,13 @@ def extract_video_features(video_path: str):
         side = choose_visible_side(landmarks)
         frame_features.append(extract_frame_features(landmarks, side))
 
-    cap.release()
-    pose.close()
+    capture.release()
+    pose_detector.close()
 
     if not frame_features:
         return None
 
-    return aggregate_window(frame_features).tolist()
+    return aggregate_window_features(frame_features).tolist()
 
 
 

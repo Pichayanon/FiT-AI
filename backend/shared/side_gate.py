@@ -59,8 +59,10 @@ class SideGate:
             mp_pose.PoseLandmark.RIGHT_FOOT_INDEX: "R_FOOT",
         }
 
-    def side_score(
-        self, landmarks: List[Any], side: str
+    def score_side_visibility(
+        self,
+        landmarks: List[Any],
+        side: str,
     ) -> Tuple[bool, float, Dict[str, float]]:
         """Compute visibility score for the given side.
 
@@ -71,19 +73,19 @@ class SideGate:
         Returns:
             Tuple of (all_visible, average_visibility, visibility_map).
         """
-        vis_map: Dict[str, float] = {}
-        ok = True
-        vis_sum = 0.0
+        visibility_by_landmark: Dict[str, float] = {}
+        all_visible = True
+        visibility_sum = 0.0
 
         for idx in self.SIDE_LM[side]:
-            v = float(landmarks[idx].visibility)
-            vis_map[self.REQ_LM_LABELS.get(idx, str(idx))] = v
-            vis_sum += v
-            if v < self.vis_th:
-                ok = False
+            visibility = float(landmarks[idx].visibility)
+            visibility_by_landmark[self.REQ_LM_LABELS.get(idx, str(idx))] = visibility
+            visibility_sum += visibility
+            if visibility < self.vis_th:
+                all_visible = False
 
-        avg = vis_sum / max(1, len(self.SIDE_LM[side]))
-        return ok, avg, vis_map
+        average_visibility = visibility_sum / max(1, len(self.SIDE_LM[side]))
+        return all_visible, average_visibility, visibility_by_landmark
 
     def choose_best_side(
         self, landmarks: List[Any]
@@ -99,31 +101,39 @@ class SideGate:
         Returns:
             Tuple of (side_name_or_None, debug_info_dict).
         """
-        left_ok, left_avg, left_map = self.side_score(landmarks, "left")
-        right_ok, right_avg, right_map = self.side_score(landmarks, "right")
+        left_visible, left_average, left_visibility = self.score_side_visibility(
+            landmarks,
+            "left",
+        )
+        right_visible, right_average, right_visibility = self.score_side_visibility(
+            landmarks,
+            "right",
+        )
 
-        debug: Dict[str, Any] = {
-            "left_ok": left_ok,
-            "left_avg": round(left_avg, 3),
-            "left_vis": left_map,
-            "right_ok": right_ok,
-            "right_avg": round(right_avg, 3),
-            "right_vis": right_map,
+        debug_info: Dict[str, Any] = {
+            "left_ok": left_visible,
+            "left_avg": round(left_average, 3),
+            "left_vis": left_visibility,
+            "right_ok": right_visible,
+            "right_avg": round(right_average, 3),
+            "right_vis": right_visibility,
             "mode": self.side_mode,
             "vis_th": self.vis_th,
         }
 
         if self.side_mode == "left":
-            return ("left" if left_ok else None), debug
+            return ("left" if left_visible else None), debug_info
         if self.side_mode == "right":
-            return ("right" if right_ok else None), debug
+            return ("right" if right_visible else None), debug_info
 
         # auto mode
-        if left_ok and not right_ok:
-            return "left", debug
-        if right_ok and not left_ok:
-            return "right", debug
-        if left_ok and right_ok:
-            return ("left" if left_avg >= right_avg else "right"), debug
+        if left_visible and not right_visible:
+            return "left", debug_info
+        if right_visible and not left_visible:
+            return "right", debug_info
+        if left_visible and right_visible:
+            return (
+                "left" if left_average >= right_average else "right"
+            ), debug_info
 
-        return None, debug
+        return None, debug_info

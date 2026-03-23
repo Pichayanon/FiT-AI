@@ -52,7 +52,7 @@ def _get_simple_tcn_config(
     return channels, dropout, use_attention
 
 
-def load_tcn(path: str) -> Tuple[
+def load_sequence_tcn(path: str) -> Tuple[
     Optional[SimpleTCN],
     Optional[int],
     Optional[Dict[int, str]],
@@ -71,13 +71,13 @@ def load_tcn(path: str) -> Tuple[
     """
     try:
         checkpoint = torch.load(path, map_location="cpu")
-        in_dim = int(checkpoint["in_dim"])
+        input_dim = int(checkpoint["in_dim"])
         target_window_size = int(checkpoint["T"])
         label_map = checkpoint["label_map"]
         inverse_label_map = {value: key for key, value in label_map.items()}
         channels, dropout, use_attention = _get_simple_tcn_config(checkpoint)
         model = SimpleTCN(
-            in_dim=in_dim,
+            in_dim=input_dim,
             num_classes=len(inverse_label_map),
             channels=channels,
             dropout=dropout,
@@ -86,11 +86,11 @@ def load_tcn(path: str) -> Tuple[
         model.load_state_dict(checkpoint["model_state"])
         model.eval()
         print(
-            f"[MODEL] Loaded: {path} in_dim={in_dim} T={target_window_size} "
+            f"[MODEL] Loaded: {path} in_dim={input_dim} T={target_window_size} "
             f"classes={inverse_label_map} channels={channels} "
             f"use_attention={use_attention}"
         )
-        return model, target_window_size, inverse_label_map, in_dim
+        return model, target_window_size, inverse_label_map, input_dim
     except Exception as e:  # pylint: disable=broad-except
         print(f"[MODEL] Cannot load: {path} err={e}")
         return None, None, None, None
@@ -128,7 +128,7 @@ def load_phase_tcn(
         return None, None, None
 
 
-def tcn_predict(
+def predict_sequence_tcn(
     model: Any,
     inv_labels: Dict[int, str],
     target_t: int,
@@ -163,3 +163,8 @@ def tcn_predict(
             str(predicted_class_index),
         )
     return predicted_label, confidence, probabilities
+
+
+# Backward-compatible aliases while callers are migrated.
+load_tcn = load_sequence_tcn
+tcn_predict = predict_sequence_tcn

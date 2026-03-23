@@ -60,9 +60,9 @@ class TemporalBlock(nn.Module):
         y = y[..., : -self.pad] if self.pad > 0 else y
         y = self.drop2(self.act2(y))
 
-        res = x if self.down is None else self.down(x)
-        res = res[..., -y.shape[-1] :]
-        return y + res
+        residual = x if self.down is None else self.down(x)
+        residual = residual[..., -y.shape[-1] :]
+        return y + residual
 
 
 class SimpleTCN(nn.Module):

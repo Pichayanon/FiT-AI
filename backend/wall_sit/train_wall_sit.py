@@ -22,7 +22,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from wall_sit.features import aggregate_window, extract_frame_features
+from wall_sit.features import aggregate_window_features, extract_frame_features
 
 # -----------------------------
 # Config
@@ -69,13 +69,13 @@ class WallSitFeatureExtractor:
         self._pose = mp_pose.Pose()
 
     def extract(self, video_path: str) -> Optional[List[float]]:
-        cap = cv2.VideoCapture(video_path)
+        capture = cv2.VideoCapture(video_path)
 
         frame_features: List[Tuple[float, float, float]] = []
 
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
+        while capture.isOpened():
+            frame_ok, frame = capture.read()
+            if not frame_ok:
                 break
 
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -90,12 +90,12 @@ class WallSitFeatureExtractor:
             side = "right" if right_visibility > left_visibility else "left"
             frame_features.append(extract_frame_features(landmarks, side))
 
-        cap.release()
+        capture.release()
 
         if not frame_features:
             return None
 
-        return aggregate_window(frame_features).tolist()
+        return aggregate_window_features(frame_features).tolist()
 
 
 class WallSitTrainer:

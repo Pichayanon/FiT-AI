@@ -55,17 +55,17 @@ class StatusSender:
     async def send_info(
         self,
         websocket: WebSocket,
-        msg: str,
+        message: str,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Send an informational message to the client (not throttled).
 
         Args:
             websocket: Active WebSocket connection.
-            msg: Human-readable message string.
+            message: Human-readable message string.
             extra: Optional additional key-value pairs to include in the payload.
         """
-        payload: Dict[str, Any] = {"type": "info", "message": msg}
+        payload: Dict[str, Any] = {"type": "info", "message": message}
         if extra:
             payload.update(extra)
         await websocket.send_text(json.dumps(payload))

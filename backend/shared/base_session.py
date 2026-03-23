@@ -5,8 +5,8 @@ Eliminates the duplicated main receive loop and start/stop handling that previou
 existed in every exercise module (squat, lunges, plank, wall_sit).
 
 Subclasses must:
-    - Set self.ws, self.status, self.debug, and self.st in __init__
-    - self.st must have: started: bool, session_id: str
+    - Set self.websocket, self.status_sender, self.debug, and self.state in __init__
+    - self.state must have: started: bool, session_id: str
     - Override _create_state() to return a fresh exercise StreamState
     - Override _handle_frame() with exercise-specific frame logic
     - Optionally override _initial_status, _on_start(), _on_stop(), _stop_extra()
@@ -32,16 +32,16 @@ class BaseWebSocketSession:
     module only needs to implement exercise-specific logic.
 
     Attributes set by subclasses in __init__:
-        ws: Active WebSocket connection.
-        status: StatusSender instance for throttled messaging.
+        websocket: Active WebSocket connection.
+        status_sender: StatusSender instance for throttled messaging.
         debug: Debug logging flag.
-        st: Session state object — must have .started (bool) and .session_id (str).
+        state: Session state object — must have .started (bool) and .session_id (str).
     """
 
-    ws: WebSocket
-    status: StatusSender
+    websocket: WebSocket
+    status_sender: StatusSender
     debug: bool
-    st: Any  # Any dataclass/object with .started and .session_id
+    state: Any  # Any dataclass/object with .started and .session_id
 
     # ---------------------------------------------------------------
     # State factory (override in subclasses)
@@ -77,7 +77,7 @@ class BaseWebSocketSession:
     # ---------------------------------------------------------------
 
     async def _on_connected(self) -> None:
-        """Called once after ws.accept().
+        """Called once after websocket.accept().
 
         Override to send dimension warnings, welcome messages, or any
         exercise-specific initialization message to the client.
@@ -111,34 +111,139 @@ class BaseWebSocketSession:
 
     async def _handle_start(self) -> None:
         """Handle {"type": "start"} message. Reset state for a new session."""
-        if getattr(self, "st", None) is not None and getattr(self.st, "started", False):
+        if getattr(self, "state", None) is not None and getattr(self.state, "started", False):
             await self._on_stop()
-        self.st = self._create_state()
-        self.st.started = True
-        self.st.session_id = str(int(time.time() * 1000))
-        print(f"[SESSION] START session_id={self.st.session_id}")
+        self.state = self._create_state()
+        self.state.started = True
+        self.state.session_id = str(int(time.time() * 1000))
+        print(f"[SESSION] START session_id={self.state.session_id}")
         await self._on_start()
-        await self.status.send_info(
-            self.ws, "Start streaming", {"session_id": self.st.session_id}
+        await self.status_sender.send_info(
+            self.websocket,
+            "Start streaming",
+            {"session_id": self.state.session_id},
         )
-        await self.status.send_status(
-            self.ws, self.st, self._initial_status,
+        await self.status_sender.send_status(
+            self.websocket,
+            self.state,
+            self._initial_status,
             {"reason": "session_started"}, force=True,
         )
 
     async def _handle_stop(self) -> None:
         """Handle {"type": "stop"} message. Finalize and clean up session."""
-        print(f"[SESSION] STOP session_id={self.st.session_id}")
-        self.st.started = False
-        await self.status.send_info(
-            self.ws, "Stop streaming",
-            {"session_id": self.st.session_id, **self._stop_extra()},
+        print(f"[SESSION] STOP session_id={self.state.session_id}")
+        self.state.started = False
+        await self.status_sender.send_info(
+            self.websocket,
+            "Stop streaming",
+            {"session_id": self.state.session_id, **self._stop_extra()},
         )
-        await self.status.send_status(
-            self.ws, self.st, self._initial_status,
+        await self.status_sender.send_status(
+            self.websocket,
+            self.state,
+            self._initial_status,
             {"reason": "session_stopped"}, force=True,
         )
         await self._on_stop()
+
+    # ---------------------------------------------------------------
+    # Shared watchdog helpers
+    # (used by all exercise sessions that have darkness/no-pose detection)
+    # ---------------------------------------------------------------
+
+    async def _update_dark_watchdog(
+        self,
+        too_dark: bool,
+        brightness_mean: float,
+    ) -> None:
+        """Send a light-adjust warning once darkness persists beyond the threshold.
+
+        Subclasses must set self.dark_adjust_seconds and self.dark_brightness_th in __init__.
+        self.state must have dark_since (Optional[float]) and dark_alerted (bool) fields.
+        """
+        now = time.time()
+
+        if not too_dark:
+            self.state.dark_since = None
+            self.state.dark_alerted = False
+            return
+
+        if self.state.dark_since is None:
+            self.state.dark_since = now
+            self.state.dark_alerted = False
+            return
+
+        if self.state.dark_alerted:
+            return
+
+        if now - self.state.dark_since >= self.dark_adjust_seconds:
+            await self.status_sender.send_info(
+                self.websocket,
+                "Please adjust your lights.",
+                {
+                    "brightness_mean": round(brightness_mean, 1),
+                    "brightness_th": self.dark_brightness_th,
+                },
+            )
+            self.state.dark_alerted = True
+
+    async def _handle_no_pose(
+        self,
+        too_dark: bool,
+        brightness_mean: float,
+        gate_debug: Dict[str, Any],
+    ) -> None:
+        """Handle frames where pose detection or side-view gate fails.
+
+        Manages the NO_POSE watchdog timer, sends a camera-adjust message
+        after no_pose_adjust_seconds of consecutive no-pose frames, then
+        resets gate/buffers and sends a NO_POSE status.
+
+        Subclasses must set no_pose_adjust_seconds, dark_brightness_th,
+        phase_no_pose, ready_streak_n, window_frames in __init__.
+        self.state must have no_pose_since, no_pose_alerted, dark_since,
+        dark_alerted, and the gate/buffer fields cleared by _reset_gate_and_buffers.
+        """
+        now = time.time()
+
+        if self.state.no_pose_since is None:
+            self.state.no_pose_since = now
+            self.state.no_pose_alerted = False
+
+        if (
+            (not self.state.no_pose_alerted)
+            and (now - self.state.no_pose_since >= self.no_pose_adjust_seconds)
+            and (not too_dark)
+        ):
+            await self.status_sender.send_info(
+                self.websocket,
+                "Adjust your camera to see your full body",
+                {
+                    "brightness_mean": round(brightness_mean, 1),
+                    "brightness_th": self.dark_brightness_th,
+                },
+            )
+            self.state.no_pose_alerted = True
+
+        self._reset_gate_and_buffers(reset_watchdog=False)
+
+        await self.status_sender.send_status(
+            self.websocket,
+            self.state,
+            self.phase_no_pose,
+            {
+                "chosen_side": None,
+                "ready_streak": 0,
+                "needed_streak": self.ready_streak_n,
+                "window_fill": 0,
+                "window_size": self.window_frames,
+                "too_dark": too_dark,
+                "brightness_mean": round(brightness_mean, 1),
+                "brightness_th": self.dark_brightness_th,
+                "debug": gate_debug if self.debug else None,
+            },
+        )
 
     # ---------------------------------------------------------------
     # Frame handler (override in subclasses)
@@ -164,40 +269,43 @@ class BaseWebSocketSession:
         Do not override this method — put exercise logic in _handle_frame,
         _create_state, _on_start, _on_stop, _stop_extra, and _on_connected.
         """
-        await self.ws.accept()
+        await self.websocket.accept()
         await self._on_connected()
 
         try:
             while True:
-                msg = await self.ws.receive_text()
-                data = parse_json(msg)
+                message_text = await self.websocket.receive_text()
+                data = parse_json(message_text)
                 if data is None:
-                    await self.status.send_info(self.ws, "Invalid JSON")
+                    await self.status_sender.send_info(self.websocket, "Invalid JSON")
                     continue
 
-                mtype = data.get("type")
-                if mtype == "start":
+                message_type = data.get("type")
+                if message_type == "start":
                     await self._handle_start()
-                elif mtype == "stop":
+                elif message_type == "stop":
                     await self._handle_stop()
-                elif mtype == "frame" and self.st.started:
+                elif message_type == "frame" and self.state.started:
                     await self._handle_frame(data)
 
         except WebSocketDisconnect:
-            print(f"[WS] disconnect session_id={self.st.session_id}")
+            print(f"[WS] disconnect session_id={self.state.session_id}")
             try:
                 await self._on_stop()
             except Exception:  # pylint: disable=broad-except
                 pass
 
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"[WS] error: {e}")
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[WS] error: {exc}")
             print(traceback.format_exc())
             try:
                 await self._on_stop()
             except Exception:  # pylint: disable=broad-except
                 pass
             try:
-                await self.status.send_info(self.ws, f"Server error: {e}")
+                await self.status_sender.send_info(
+                    self.websocket,
+                    f"Server error: {exc}",
+                )
             except Exception:  # pylint: disable=broad-except
                 pass

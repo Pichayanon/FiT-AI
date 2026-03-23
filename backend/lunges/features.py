@@ -12,7 +12,12 @@ from typing import Any, Optional, Tuple
 
 import numpy as np
 
-from shared.math_utils import angle_3pts, dist, get_xyz, safe_norm
+from shared.math_utils import (
+    angle_from_points,
+    landmarks_to_xyz,
+    point_distance,
+    safe_norm,
+)
 
 
 # ---------------------------------------------------------------
@@ -41,7 +46,7 @@ RIGHT_FOOT_INDEX = 32
 # Shared landmark parsing
 # ---------------------------------------------------------------
 
-def _to_single_frame_xyz(landmarks: Any) -> np.ndarray:
+def _as_xyz_frame(landmarks: Any) -> np.ndarray:
     """Return a single frame of xyz landmarks as shape (33, 3)."""
     if isinstance(landmarks, np.ndarray):
         landmark_array = np.asarray(landmarks, dtype=np.float32)
@@ -52,10 +57,10 @@ def _to_single_frame_xyz(landmarks: Any) -> np.ndarray:
         ):
             raise ValueError("Expected landmark frame with shape (33, 3/4).")
         return landmark_array[:, :3].astype(np.float32)
-    return get_xyz(landmarks)
+    return landmarks_to_xyz(landmarks)
 
 
-def _to_landmark_sequence_xyz(landmark_sequence: np.ndarray) -> np.ndarray:
+def _as_xyz_sequence(landmark_sequence: np.ndarray) -> np.ndarray:
     """Return a landmark sequence as shape (T, 33, 3)."""
     landmark_array = np.asarray(landmark_sequence, dtype=np.float32)
     if (
@@ -67,7 +72,7 @@ def _to_landmark_sequence_xyz(landmark_sequence: np.ndarray) -> np.ndarray:
     return landmark_array[..., :3].astype(np.float32)
 
 
-def _to_single_frame_xy(landmarks: Any) -> np.ndarray:
+def _as_xy_frame(landmarks: Any) -> np.ndarray:
     """Return a single frame of xy landmarks as shape (33, 2)."""
     if isinstance(landmarks, np.ndarray):
         landmark_array = np.asarray(landmarks, dtype=np.float32)
@@ -78,11 +83,11 @@ def _to_single_frame_xy(landmarks: Any) -> np.ndarray:
         ):
             raise ValueError("Expected landmark frame with shape (33, 2/3/4).")
         return landmark_array[:, :2].astype(np.float32)
-    return get_xyz(landmarks)[:, :2]
+    return landmarks_to_xyz(landmarks)[:, :2]
 
 
 # ---------------------------------------------------------------
-# Bottom features (42-D) — matches lunges/extract_bottom_lunges.py
+# Bottom features (42-D)
 # ---------------------------------------------------------------
 
 def _normalize_facing_direction(frame_xyz: np.ndarray) -> np.ndarray:
@@ -174,7 +179,7 @@ def _extract_bottom_features_from_single_frame_xyz(frame_xyz: np.ndarray) -> np.
     shoulder_midpoint = 0.5 * (front_shoulder + back_shoulder)
     ear_midpoint = 0.5 * (front_ear + back_ear)
 
-    torso_length = dist(hip_midpoint, shoulder_midpoint)
+    torso_length = point_distance(hip_midpoint, shoulder_midpoint)
     reference_scale = torso_length if torso_length > 1e-4 else 1.0
 
     ordered_joint_indices = [
@@ -196,10 +201,18 @@ def _extract_bottom_features_from_single_frame_xyz(frame_xyz: np.ndarray) -> np.
             orientation_normalized_xyz[joint_index] - hip_midpoint
         ) / reference_scale
 
-    feature_vector[30] = angle_3pts(front_hip, front_knee, front_ankle) / 180.0
-    feature_vector[31] = angle_3pts(back_hip, back_knee, back_ankle) / 180.0
-    feature_vector[32] = angle_3pts(front_shoulder, front_hip, front_knee) / 180.0
-    feature_vector[33] = angle_3pts(back_shoulder, back_hip, back_knee) / 180.0
+    feature_vector[30] = (
+        angle_from_points(front_hip, front_knee, front_ankle) / 180.0
+    )
+    feature_vector[31] = (
+        angle_from_points(back_hip, back_knee, back_ankle) / 180.0
+    )
+    feature_vector[32] = (
+        angle_from_points(front_shoulder, front_hip, front_knee) / 180.0
+    )
+    feature_vector[33] = (
+        angle_from_points(back_shoulder, back_hip, back_knee) / 180.0
+    )
 
     torso_vector = shoulder_midpoint - hip_midpoint
     vertical_up_vector = np.array([0.0, -1.0, 0.0], dtype=np.float32)
@@ -215,14 +228,16 @@ def _extract_bottom_features_from_single_frame_xyz(frame_xyz: np.ndarray) -> np.
     )
     feature_vector[34] = float(np.degrees(np.arccos(torso_tilt_cosine))) / 180.0
 
-    feature_vector[35] = dist(front_ankle, back_ankle) / reference_scale
+    feature_vector[35] = point_distance(front_ankle, back_ankle) / reference_scale
     feature_vector[36] = front_knee[0] - front_ankle[0]
     feature_vector[37] = back_knee[0] - back_ankle[0]
 
     ground_y = max(front_ankle[1], back_ankle[1])
     feature_vector[38] = ground_y - front_knee[1]
     feature_vector[39] = ground_y - back_knee[1]
-    feature_vector[40] = angle_3pts(ear_midpoint, shoulder_midpoint, hip_midpoint) / 180.0
+    feature_vector[40] = (
+        angle_from_points(ear_midpoint, shoulder_midpoint, hip_midpoint) / 180.0
+    )
     feature_vector[41] = (ground_y - hip_midpoint[1]) / reference_scale
 
     return feature_vector
@@ -231,7 +246,7 @@ def _extract_bottom_features_from_single_frame_xyz(frame_xyz: np.ndarray) -> np.
 def extract_bottom_features(landmarks: Any) -> np.ndarray:
     """Extract 42-dim bottom features from one frame or a sequence."""
     if isinstance(landmarks, np.ndarray) and landmarks.ndim == 3:
-        landmark_sequence_xyz = _to_landmark_sequence_xyz(landmarks)
+        landmark_sequence_xyz = _as_xyz_sequence(landmarks)
         return np.stack(
             [
                 _extract_bottom_features_from_single_frame_xyz(
@@ -242,12 +257,12 @@ def extract_bottom_features(landmarks: Any) -> np.ndarray:
             axis=0,
         )
     return _extract_bottom_features_from_single_frame_xyz(
-        _to_single_frame_xyz(landmarks)
+        _as_xyz_frame(landmarks)
     )
 
 
 # ---------------------------------------------------------------
-# Phase features (6-D) — matches lunges/extract_phase.py
+# Phase features (6-D)
 # ---------------------------------------------------------------
 
 def extract_phase_features(
@@ -264,7 +279,7 @@ def extract_phase_features(
         [4] shoulder velocity
         [5] knee velocity
     """
-    frame_xy = _to_single_frame_xy(landmarks)
+    frame_xy = _as_xy_frame(landmarks)
 
     hip_midpoint = (frame_xy[LEFT_HIP_INDEX] + frame_xy[RIGHT_HIP_INDEX]) * 0.5
     shoulder_midpoint = (

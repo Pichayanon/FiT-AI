@@ -97,7 +97,7 @@ GOAL_GOOD_REPS = 5
 
 PHASE_LABELS = {0: "eccentric", 1: "concentric"}
 
-mp_pose = mp.solutions.pose
+pose_module = mp.solutions.pose
 
 # ---------------------------------------------------------------
 # FastAPI Application
@@ -112,7 +112,10 @@ app = make_app("FiT-AI Squat Streaming Backend")
 
 model_service = SquatModelService(TCN_MODEL_PATH, STAND_MODEL_PATH, PHASE_MODEL_PATH)
 front_view_gate = FrontViewGateDynamic(
-    mp_pose, FRONT_VIS_TH, FRONT_MIN_SHOULDER_X_GAP, FRONT_MIN_HIP_X_GAP
+    pose_module,
+    FRONT_VIS_TH,
+    FRONT_MIN_SHOULDER_X_GAP,
+    FRONT_MIN_HIP_X_GAP,
 )
 status_sender = StatusSender(STATUS_SEND_EVERY_N_FRAMES, PHASE_SEND_EVERY_N_FRAMES)
 
@@ -155,9 +158,9 @@ async def ws_video(websocket: WebSocket) -> None:
     """WebSocket endpoint for squat streaming sessions."""
     session = SquatWebSocketSession(
         websocket=websocket,
-        model_svc=model_service,
+        model_service=model_service,
         gate=front_view_gate,
-        status=status_sender,
+        status_sender=status_sender,
         ready_streak_n=READY_STREAK_N,
         debug=DEBUG,
         bottom_feature_dim=BOTTOM_FEATURE_DIM,

@@ -61,37 +61,40 @@ class FrontViewGateDynamic:
             mp_pose.PoseLandmark.RIGHT_ANKLE: "R_ANK",
         }
 
-    def check(self, lm: List[Any]) -> Tuple[bool, Dict[str, Any]]:
+    def evaluate(self, landmarks: List[Any]) -> Tuple[bool, Dict[str, Any]]:
         """Check if the front-view gate passes.
 
         Args:
-            lm: MediaPipe landmark list.
+            landmarks: MediaPipe landmark list.
 
         Returns:
             Tuple of (gate_passes, debug_info_dict).
         """
-        vis_map: Dict[str, float] = {}
-        ok_vis = True
+        visibility_by_landmark: Dict[str, float] = {}
+        visibility_ok = True
         for idx in self.FRONT_LM:
-            v = float(lm[idx].visibility)
-            vis_map[self.FRONT_LM_LABELS.get(idx, str(idx))] = round(v, 3)
-            if v < self.vis_th:
-                ok_vis = False
+            visibility = float(landmarks[idx].visibility)
+            visibility_by_landmark[self.FRONT_LM_LABELS.get(idx, str(idx))] = round(
+                visibility,
+                3,
+            )
+            if visibility < self.vis_th:
+                visibility_ok = False
 
-        lsho_x = float(lm[self.mp_pose.PoseLandmark.LEFT_SHOULDER].x)
-        rsho_x = float(lm[self.mp_pose.PoseLandmark.RIGHT_SHOULDER].x)
-        lhip_x = float(lm[self.mp_pose.PoseLandmark.LEFT_HIP].x)
-        rhip_x = float(lm[self.mp_pose.PoseLandmark.RIGHT_HIP].x)
-        sho_gap = abs(lsho_x - rsho_x)
-        hip_gap = abs(lhip_x - rhip_x)
-        ok_gap = (sho_gap >= self.min_sho_gap) and (hip_gap >= self.min_hip_gap)
+        left_shoulder_x = float(landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER].x)
+        right_shoulder_x = float(landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER].x)
+        left_hip_x = float(landmarks[self.mp_pose.PoseLandmark.LEFT_HIP].x)
+        right_hip_x = float(landmarks[self.mp_pose.PoseLandmark.RIGHT_HIP].x)
+        shoulder_gap = abs(left_shoulder_x - right_shoulder_x)
+        hip_gap = abs(left_hip_x - right_hip_x)
+        gap_ok = (shoulder_gap >= self.min_sho_gap) and (hip_gap >= self.min_hip_gap)
 
-        dbg = {
-            "vis_ok": ok_vis,
-            "gap_ok": ok_gap,
-            "sho_gap": round(sho_gap, 3),
+        debug_info = {
+            "vis_ok": visibility_ok,
+            "gap_ok": gap_ok,
+            "sho_gap": round(shoulder_gap, 3),
             "hip_gap": round(hip_gap, 3),
             "vis_th": float(self.vis_th),
-            "vis": vis_map,
+            "vis": visibility_by_landmark,
         }
-        return (ok_vis and ok_gap), dbg
+        return (visibility_ok and gap_ok), debug_info
