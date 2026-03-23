@@ -16,23 +16,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements.base.txt requirements.ml.txt /app/
+COPY requirements.base.txt requirements.ml.txt /app/
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --upgrade pip setuptools wheel
+    pip install --upgrade pip setuptools wheel
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --prefer-binary -r /app/requirements.base.txt
+    pip install --prefer-binary -r /app/requirements.base.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --prefer-binary -r /app/requirements.ml.txt
+    pip install --prefer-binary -r /app/requirements.ml.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+    pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 COPY . /app/
 
-EXPOSE 5050 5051 5052 5053
+EXPOSE 7860
 
-# Overridden per service in docker-compose.yml
-CMD ["python", "-m", "wall_sit.wall_sit_streaming"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860", "--log-level", "info"]

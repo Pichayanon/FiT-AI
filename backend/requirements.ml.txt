@@ -1,2 +1,1 @@
-mediapipe
-torch
+mediapipe==0.10.14

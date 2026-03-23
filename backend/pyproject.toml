@@ -1,0 +1,16 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::UserWarning",
+    "ignore::FutureWarning",
+    "ignore::sklearn.exceptions.InconsistentVersionWarning",
+]
+
+[tool.coverage.run]
+source = ["shared", "squat", "plank", "lunges", "wall_sit"]
+omit = ["**/train_*.py", "**/models/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

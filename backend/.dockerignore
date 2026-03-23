@@ -6,3 +6,15 @@ __pycache__/
 *.mp4
 recordings_squat/
 lunges/recordings/
+tests/
+.idea/
+.pytest_cache/
+coverage.xml
+htmlcov/
+train_*.py
+docker-compose.yml
+Dockerfile
+Dockerfile.hf
+README.hf.md
+pyproject.toml
+requirements.txt
