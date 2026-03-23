@@ -54,31 +54,8 @@ jobs:
           path: backend/coverage.xml
 
   # ─────────────────────────────────────────────
-  # 2. SonarQube analysis
-  # ─────────────────────────────────────────────
-  sonar:
-    runs-on: ubuntu-latest
-    needs: test
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download coverage artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: coverage-report
-          path: backend/
-
-      - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v6
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  # ─────────────────────────────────────────────
-  # 3. Deploy to Hugging Face Spaces
+  # 2. Deploy to Hugging Face Spaces
+  # SonarCloud runs automatically via GitHub App
   # ─────────────────────────────────────────────
   deploy:
     runs-on: ubuntu-latest
