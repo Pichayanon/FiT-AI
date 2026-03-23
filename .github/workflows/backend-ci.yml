@@ -53,6 +53,9 @@ jobs:
           name: coverage-report
           path: backend/coverage.xml
 
+  # ─────────────────────────────────────────────
+  # 2. SonarCloud scan with coverage
+  # ─────────────────────────────────────────────
   sonar:
     runs-on: ubuntu-latest
     needs: test
@@ -68,20 +71,17 @@ jobs:
           name: coverage-report
           path: backend
 
-      - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v5
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
   # ─────────────────────────────────────────────
   # 3. Deploy to Hugging Face Spaces
   # ─────────────────────────────────────────────
   deploy:
     runs-on: ubuntu-latest
-    needs:
-      - test
-      - sonar
+    needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
