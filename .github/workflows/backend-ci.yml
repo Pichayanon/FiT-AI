@@ -6,8 +6,8 @@ on:
     paths:
       - "backend/**"
       - ".github/workflows/backend-ci.yml"
-      - "backend/sonar-project.properties
-  
+      - "backend/sonar-project.properties"
+
   pull_request:
     branches: [main]
     paths:
@@ -22,7 +22,6 @@ jobs:
   unit-test:
     name: Unit Tests
     runs-on: ubuntu-latest
-
 
     defaults:
       run:
@@ -46,8 +45,6 @@ jobs:
           pip install "coverage[toml]" pytest pytest-asyncio
 
       - name: Run tests with coverage
-        env:
-          PYTHONPATH: backend
         run: |
           coverage run -m pytest tests/ -v
           coverage report -i -m
@@ -60,38 +57,7 @@ jobs:
           path: backend/coverage.xml
 
   # ─────────────────────────────────────────────
-  # 2. API tests (WebSocket end-to-end)
-  # ─────────────────────────────────────────────
-  api-test:
-    name: API Tests
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Install test dependencies
-        run: |
-          pip install \
-            websockets \
-            requests \
-            numpy \
-            opencv-python-headless \
-            certifi
-
-      - name: Run API test suite
-        env:
-          BASE_HTTP: ${{ secrets.BASE_HTTP }}
-          BASE_WS: ${{ secrets.BASE_WS }}
-        run: |
-          cd backend
-          python test_api.py
-
-  # ─────────────────────────────────────────────
-  # 3. SonarCloud scan
+  # 2. SonarCloud scan
   # ─────────────────────────────────────────────
   sonar:
     name: SonarCloud Scan
@@ -117,13 +83,13 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   # ─────────────────────────────────────────────
-  # 4. Deploy to HuggingFace Spaces
-  #    runs only on push to main, after both test jobs pass
+  # 3. Deploy to HuggingFace Spaces
+  #    runs only on push to main, after unit tests pass
   # ─────────────────────────────────────────────
   deploy:
     name: Deploy to HuggingFace
     runs-on: ubuntu-latest
-    needs: [unit-test, api-test]
+    needs: [unit-test]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
@@ -166,3 +132,41 @@ jobs:
           git add .
           git commit -m "Deploy from ${{ github.sha }}"
           git push --force "https://Nuafah:${HF_TOKEN}@huggingface.co/spaces/Nuafah/fit-ai-ml" main
+
+  # ─────────────────────────────────────────────
+  # 4. API tests (WebSocket end-to-end)
+  #    runs after deploy, tests the live HF Space
+  #    skipped if secrets are not set
+  # ─────────────────────────────────────────────
+  api-test:
+    name: API Tests
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install test dependencies
+        run: |
+          pip install \
+            websockets \
+            requests \
+            numpy \
+            opencv-python-headless \
+            certifi
+
+      - name: Wait for HF Space to rebuild
+        run: sleep 120
+
+      - name: Run API test suite
+        env:
+          BASE_HTTP: ${{ secrets.BASE_HTTP }}
+          BASE_WS: ${{ secrets.BASE_WS }}
+        run: |
+          cd backend
+          python tests/api/test_api.py
