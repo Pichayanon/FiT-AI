@@ -68,7 +68,8 @@ def make_landmarks() -> list:
 
 def build_session(monkeypatch, *, pose_results, gate_results, model_service, pre_frames=1, post_frames=1):
     fake_pose = FakePose(pose_results)
-    monkeypatch.setattr("squat.session.mp.solutions.pose.Pose", lambda **kwargs: fake_pose)
+    import mediapipe as mp
+    monkeypatch.setattr(mp.solutions.pose, "Pose", lambda **kwargs: fake_pose)
     monkeypatch.setattr(
         "squat.session.FrameDecoder.decode_jpeg_base64",
         lambda payload: np.zeros((4, 4, 3), dtype=np.uint8),

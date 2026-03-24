@@ -41,7 +41,7 @@ def test_extract_frame_features_returns_expected_wall_sit_values() -> None:
 
     np.testing.assert_allclose(
         features,
-        np.array([0.5, 0.5, 0.0], dtype=np.float32),
+        np.array([0.5, 90.0, 0.0], dtype=np.float32),
         atol=1e-6,
     )
 
@@ -49,19 +49,19 @@ def test_extract_frame_features_returns_expected_wall_sit_values() -> None:
 def test_aggregate_window_features_returns_expected_statistics() -> None:
     aggregated = aggregate_window_features(
         [
-            (0.5, 0.5, 0.0),
-            (1.0, 0.25, 0.5),
+            (0.5, 90.0, 0.0),
+            (1.0, 45.0, 0.5),
         ]
     )
 
     np.testing.assert_allclose(
         aggregated,
-        np.array([0.75, 0.25, 0.375, 0.25, 0.25], dtype=np.float32),
+        np.array([0.75, 0.25, 67.5, 45.0, 0.25], dtype=np.float32),
     )
 
 
 def test_static_aggregate_window_matches_module_function() -> None:
-    frame_values = [(0.5, 0.5, 0.0), (1.0, 0.25, 0.5)]
+    frame_values = [(0.5, 90.0, 0.0), (1.0, 45.0, 0.5)]
 
     np.testing.assert_allclose(
         WallSitFeatureExtractor.aggregate_window(frame_values),
@@ -75,7 +75,7 @@ def test_wall_sit_feature_extractor_handles_missing_and_present_pose_results() -
     assert extractor.extract_features(make_pose_result(None), "right") is None
     np.testing.assert_allclose(
         extractor.extract_features(make_pose_result(build_wall_sit_landmarks()), "right"),
-        np.array([0.5, 0.5, 0.0], dtype=np.float32),
+        np.array([0.5, 90.0, 0.0], dtype=np.float32),
         atol=1e-6,
     )
 

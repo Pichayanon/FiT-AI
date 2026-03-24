@@ -153,8 +153,9 @@ def build_session(
     model_loaded: bool = True,
 ) -> tuple[DummySideWindowSession, FakeStatusSender, FakeFeatureExtractor, FakeModelService, FakeWebSocket, FakeGate]:
     fake_pose = FakePose(pose_results)
+    import mediapipe as mp
     monkeypatch.setattr(
-        "shared.side_window_session.mp.solutions.pose.Pose",
+        mp.solutions.pose, "Pose",
         lambda **kwargs: fake_pose,
     )
     monkeypatch.setattr(

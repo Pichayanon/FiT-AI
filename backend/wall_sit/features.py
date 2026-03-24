@@ -7,10 +7,7 @@ import numpy as np
 
 from shared.math_utils import (
     angle_from_points,
-    as_xyz_frame,
-    pick_scale,
-    point_distance,
-    position_normalize,
+    as_xy_frame,
 )
 
 LEFT_SHOULDER_INDEX = 11
@@ -42,52 +39,23 @@ def side_indices(side: str) -> tuple[int, int, int, int]:
 
 
 def extract_frame_features(landmarks: list, side: str) -> FrameFeatures:
-    frame_xyz = as_xyz_frame(landmarks)
+    frame_xy = as_xy_frame(landmarks)
     shoulder_index, hip_index, knee_index, ankle_index = side_indices(side)
 
-    hip = frame_xyz[hip_index]
-    knee = frame_xyz[knee_index]
-    ankle = frame_xyz[ankle_index]
-    shoulder = frame_xyz[shoulder_index]
+    hip = frame_xy[hip_index]
+    knee = frame_xy[knee_index]
+    ankle = frame_xy[ankle_index]
+    shoulder = frame_xy[shoulder_index]
 
-    shoulder_width = point_distance(
-        frame_xyz[LEFT_SHOULDER_INDEX],
-        frame_xyz[RIGHT_SHOULDER_INDEX],
+    shoulder_width = abs(
+        frame_xy[LEFT_SHOULDER_INDEX][0] - frame_xy[RIGHT_SHOULDER_INDEX][0]
     )
-    hip_width = point_distance(
-        frame_xyz[LEFT_HIP_INDEX],
-        frame_xyz[RIGHT_HIP_INDEX],
-    )
-    reference_scale = pick_scale(hip_width, shoulder_width, fallback=1e-6)
+    foot_wall_dist = abs(ankle[0] - hip[0])
+    foot_wall_norm = foot_wall_dist / (shoulder_width + 1e-6)
+    knee_angle = angle_from_points(hip, knee, ankle)
+    torso_alignment = abs(shoulder[0] - hip[0])
 
-    normalized_hip = position_normalize(
-        hip,
-        center=hip,
-        scale=reference_scale,
-    )
-    normalized_knee = position_normalize(
-        knee,
-        center=hip,
-        scale=reference_scale,
-    )
-    normalized_ankle = position_normalize(
-        ankle,
-        center=hip,
-        scale=reference_scale,
-    )
-    normalized_shoulder = position_normalize(
-        shoulder,
-        center=hip,
-        scale=reference_scale,
-    )
-
-    foot_wall_norm = abs(normalized_ankle[0] - normalized_hip[0])
-    knee_angle_norm = (
-        angle_from_points(normalized_hip, normalized_knee, normalized_ankle) / 180.0
-    )
-    torso_alignment = abs(normalized_shoulder[0] - normalized_hip[0])
-
-    return float(foot_wall_norm), float(knee_angle_norm), float(torso_alignment)
+    return float(foot_wall_norm), float(knee_angle), float(torso_alignment)
 
 
 def aggregate_window_features(

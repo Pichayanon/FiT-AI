@@ -10,8 +10,9 @@ from tests.helpers.session_fakes import FakePose, RecordingStatusSender, Recordi
 
 def build_session(monkeypatch) -> PlankWebSocketSession:
     fake_pose = FakePose()
+    import mediapipe as mp
     monkeypatch.setattr(
-        "shared.side_window_session.mp.solutions.pose.Pose",
+        mp.solutions.pose, "Pose",
         lambda **kwargs: fake_pose,
     )
 
