@@ -39,7 +39,7 @@ LABELS: Dict[int, str] = {
     2: "hips_too_low",
 }
 
-WINDOW_FRAMES = 15
+WINDOW_FRAMES = 45
 READY_STREAK_N = 3
 VIS_TH = 0.80
 
