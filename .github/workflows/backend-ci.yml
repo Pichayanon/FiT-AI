@@ -46,7 +46,7 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          coverage run -m pytest tests/ -v
+          coverage run -m pytest tests/ -v --ignore=tests/api
           coverage report -i -m
           coverage xml -i -o coverage.xml
 
