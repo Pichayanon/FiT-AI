@@ -67,13 +67,7 @@ class SideWindowSession(BaseWebSocketSession):
         self.state = self._create_state()
 
         self.pose_module = mp.solutions.pose
-        self.pose = self.pose_module.Pose(
-            static_image_mode=False,
-            model_complexity=1,
-            enable_segmentation=False,
-            min_detection_confidence=mp_min_det_conf,
-            min_tracking_confidence=mp_min_track_conf,
-        )
+        self.pose = None  # created lazily in _on_start()
 
     async def _on_connected(self) -> None:
         await self.status_sender.send_info(self.websocket, "WebSocket connected")
@@ -95,8 +89,25 @@ class SideWindowSession(BaseWebSocketSession):
     def _initial_status(self) -> str:
         return self.phase_no_pose
 
+    async def _on_start(self) -> None:
+        try:
+            self.pose.close()
+        except Exception:
+            pass
+        self.pose = self.pose_module.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            enable_segmentation=False,
+            min_detection_confidence=self.mp_min_det_conf,
+            min_tracking_confidence=self.mp_min_track_conf,
+        )
+
     async def _on_stop(self) -> None:
         self._reset_gate_and_buffers(reset_watchdog=True)
+        try:
+            self.pose.close()
+        except Exception:
+            pass
 
     def _reset_gate_specific_fields(self) -> None:
         pass

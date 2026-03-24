@@ -6,23 +6,19 @@ on:
     paths:
       - "backend/**"
       - ".github/workflows/backend-ci.yml"
-      - "backend/sonar-project.properties"
   pull_request:
     branches: [main]
     paths:
       - "backend/**"
       - ".github/workflows/backend-ci.yml"
-      - "backend/sonar-project.properties"
 
 jobs:
   # ─────────────────────────────────────────────
-  # 1. Run tests + coverage
+  # 1. Unit tests + coverage
   # ─────────────────────────────────────────────
-  test:
+  unit-test:
+    name: Unit Tests
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
 
     steps:
       - uses: actions/checkout@v4
@@ -36,16 +32,21 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.base.txt
-          pip install -r requirements.ml.txt
+          pip install -r backend/requirements.base.txt
+          pip install -r backend/requirements.ml.txt
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install "coverage[toml]" pytest pytest-asyncio
 
       - name: Run tests with coverage
+        env:
+          PYTHONPATH: backend
         run: |
-          coverage run -m pytest tests/ -v
-          coverage report -i -m
-          coverage xml -i -o coverage.xml
+          python -m pytest backend/tests/ \
+            --cov=backend/shared --cov=backend/squat --cov=backend/plank \
+            --cov=backend/lunges --cov=backend/wall_sit \
+            --cov-report=xml:backend/coverage.xml \
+            --cov-report=term-missing \
+            -v
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
@@ -54,11 +55,43 @@ jobs:
           path: backend/coverage.xml
 
   # ─────────────────────────────────────────────
-  # 2. SonarCloud scan with coverage
+  # 2. API tests (WebSocket end-to-end)
+  # ─────────────────────────────────────────────
+  api-test:
+    name: API Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install test dependencies
+        run: |
+          pip install \
+            websockets \
+            requests \
+            numpy \
+            opencv-python-headless \
+            certifi
+
+      - name: Run API test suite
+        env:
+          BASE_HTTP: ${{ secrets.API_BASE_HTTP }}
+          BASE_WS: ${{ secrets.API_BASE_WS }}
+        run: |
+          cd backend
+          python tests/api/test_api.py
+
+  # ─────────────────────────────────────────────
+  # 3. SonarCloud scan
   # ─────────────────────────────────────────────
   sonar:
+    name: SonarCloud Scan
     runs-on: ubuntu-latest
-    needs: test
+    needs: unit-test
 
     steps:
       - uses: actions/checkout@v4
@@ -79,11 +112,13 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   # ─────────────────────────────────────────────
-  # 3. Deploy to Hugging Face Spaces
+  # 4. Deploy to HuggingFace Spaces
+  #    runs only on push to main, after both test jobs pass
   # ─────────────────────────────────────────────
   deploy:
+    name: Deploy to HuggingFace
     runs-on: ubuntu-latest
-    needs: test
+    needs: [unit-test, api-test]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
@@ -92,26 +127,18 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: Push to Hugging Face Spaces
+      - name: Push to HuggingFace Spaces
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           git lfs install
-
-          # Configure git for HF push
           git config user.email "ci@fit-ai.dev"
           git config user.name "FiT-AI CI"
 
-          # Create a temp directory with HF deploy structure
           DEPLOY_DIR=$(mktemp -d)
 
-          # Copy README for HF metadata
           cp backend/README.hf.md "$DEPLOY_DIR/README.md"
-
-          # Copy Dockerfile for HF
           cp backend/Dockerfile.hf "$DEPLOY_DIR/Dockerfile"
-
-          # Copy backend source code
           cp -r backend/shared "$DEPLOY_DIR/shared"
           cp -r backend/squat "$DEPLOY_DIR/squat"
           cp -r backend/plank "$DEPLOY_DIR/plank"
@@ -121,12 +148,10 @@ jobs:
           cp backend/requirements.base.txt "$DEPLOY_DIR/requirements.base.txt"
           cp backend/requirements.ml.txt "$DEPLOY_DIR/requirements.ml.txt"
 
-          # Clean up non-deploy files
           find "$DEPLOY_DIR" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
           find "$DEPLOY_DIR" -name "*.pyc" -delete 2>/dev/null || true
           find "$DEPLOY_DIR" -name "train_*.py" -delete 2>/dev/null || true
 
-          # Init git repo and push to HF
           cd "$DEPLOY_DIR"
           git init -b main
           git config user.email "ci@fit-ai.dev"
