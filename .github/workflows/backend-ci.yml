@@ -6,13 +6,13 @@ on:
     paths:
       - "backend/**"
       - ".github/workflows/backend-ci.yml"
-      - "sonar-project.properties"
+      - "backend/sonar-project.properties"
   pull_request:
     branches: [main]
     paths:
       - "backend/**"
       - ".github/workflows/backend-ci.yml"
-      - "sonar-project.properties"
+      - "backend/sonar-project.properties"
 
 jobs:
   # ─────────────────────────────────────────────
@@ -73,6 +73,8 @@ jobs:
 
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@v6
+        with:
+          projectBaseDir: backend
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
