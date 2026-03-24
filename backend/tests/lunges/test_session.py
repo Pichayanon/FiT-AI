@@ -87,6 +87,7 @@ def build_session(monkeypatch, *, pose_results, gate_results, model_service):
         mp_min_det_conf=0.5,
         mp_min_track_conf=0.5,
     )
+    session.pose = fake_pose
     return session, status_sender, websocket
 
 

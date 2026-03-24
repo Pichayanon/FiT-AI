@@ -196,6 +196,7 @@ def build_session(
         phase_inferencing="inferencing",
         status_send_every_n_frames=1,
     )
+    session.pose = fake_pose
     return session, status_sender, feature_extractor, model_service, websocket, gate
 
 
