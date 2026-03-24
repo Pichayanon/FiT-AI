@@ -8,8 +8,9 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["shared", "squat", "plank", "lunges", "wall_sit"]
-omit = ["**/train_*.py", "**/models/*"]
+source = ["."]
+omit = ["tests/*", "venv/*", "**/train_*.py", "**/models/*"]
+relative_files = true
 
 [tool.coverage.report]
 show_missing = true
