@@ -41,8 +41,8 @@ import websockets
 # Config  (override via env vars for CI/CD)
 # ---------------------------------------------------------------
 
-BASE_HTTP = os.getenv("BASE_HTTP")
-BASE_WS   = os.getenv("BASE_WS")
+BASE_HTTP = os.getenv("BASE_HTTP", "http://localhost:7860")
+BASE_WS   = os.getenv("BASE_WS", "ws://localhost:7860")
 
 EXERCISES   = ["squat", "plank", "lunges", "wall_sit"]
 WS_TIMEOUT  = 10   # seconds to wait for each message
