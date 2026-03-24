@@ -45,6 +45,9 @@ from squat.squat_streaming import (
     MP_MIN_DET_CONF as SQUAT_MP_MIN_DET_CONF,
     MP_MIN_TRACK_CONF as SQUAT_MP_MIN_TRACK_CONF,
     STAND_OK_LABELS as SQUAT_STAND_OK_LABELS,
+    PHASE_DECISION_MODE as SQUAT_PHASE_DECISION_MODE,
+    DARK_ADJUST_SECONDS as SQUAT_DARK_ADJUST_SECONDS,
+    DARK_BRIGHTNESS_TH as SQUAT_DARK_BRIGHTNESS_TH,
 )
 from squat.features import BOTTOM_FEATURE_DIM as SQUAT_BOTTOM_FEATURE_DIM, STAND_FEATURE_DIM as SQUAT_STAND_FEATURE_DIM
 from squat.session import SquatWebSocketSession
@@ -204,6 +207,9 @@ async def squat_ws(websocket: WebSocket) -> None:
         stand_min_streak=SQUAT_STAND_MIN_STREAK,
         stand_pred_cooldown=SQUAT_STAND_PRED_COOLDOWN,
         goal_good_reps=SQUAT_GOAL_GOOD_REPS,
+        phase_decision_mode=SQUAT_PHASE_DECISION_MODE,
+        dark_adjust_seconds=SQUAT_DARK_ADJUST_SECONDS,
+        dark_brightness_th=SQUAT_DARK_BRIGHTNESS_TH,
         mp_min_det_conf=SQUAT_MP_MIN_DET_CONF,
         mp_min_track_conf=SQUAT_MP_MIN_TRACK_CONF,
     )
