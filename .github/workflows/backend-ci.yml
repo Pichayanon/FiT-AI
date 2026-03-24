@@ -6,11 +6,14 @@ on:
     paths:
       - "backend/**"
       - ".github/workflows/backend-ci.yml"
+      - "backend/sonar-project.properties
+  
   pull_request:
     branches: [main]
     paths:
       - "backend/**"
       - ".github/workflows/backend-ci.yml"
+      - "backend/sonar-project.properties"
 
 jobs:
   # ─────────────────────────────────────────────
@@ -19,6 +22,11 @@ jobs:
   unit-test:
     name: Unit Tests
     runs-on: ubuntu-latest
+
+
+    defaults:
+      run:
+        working-directory: backend
 
     steps:
       - uses: actions/checkout@v4
@@ -32,8 +40,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r backend/requirements.base.txt
-          pip install -r backend/requirements.ml.txt
+          pip install -r requirements.base.txt
+          pip install -r requirements.ml.txt
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install "coverage[toml]" pytest pytest-asyncio
 
@@ -41,12 +49,9 @@ jobs:
         env:
           PYTHONPATH: backend
         run: |
-          python -m pytest backend/tests/ \
-            --cov=backend/shared --cov=backend/squat --cov=backend/plank \
-            --cov=backend/lunges --cov=backend/wall_sit \
-            --cov-report=xml:backend/coverage.xml \
-            --cov-report=term-missing \
-            -v
+          coverage run -m pytest tests/ -v
+          coverage report -i -m
+          coverage xml -i -o coverage.xml
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
@@ -79,11 +84,11 @@ jobs:
 
       - name: Run API test suite
         env:
-          BASE_HTTP: ${{ secrets.API_BASE_HTTP }}
-          BASE_WS: ${{ secrets.API_BASE_WS }}
+          BASE_HTTP: ${{ secrets.BASE_HTTP }}
+          BASE_WS: ${{ secrets.BASE_WS }}
         run: |
           cd backend
-          python tests/api/test_api.py
+          python test_api.py
 
   # ─────────────────────────────────────────────
   # 3. SonarCloud scan
