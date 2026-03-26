@@ -77,7 +77,7 @@ class WallSitWebSocketSession(SideWindowSession):
 
     def _pre_buffer_feature_payload(
         self,
-        frame_features: Tuple[float, float, float],
+        frame_features: Tuple[float, float, float, float],
     ) -> Optional[Dict[str, object]]:
         knee_angle = float(frame_features[1])
         if knee_angle >= self.stand_knee_angle_deg_th:

@@ -62,7 +62,7 @@ class WallSitFeatureExtractor:
     def extract(self, video_path: str) -> Optional[List[float]]:
         capture = cv2.VideoCapture(video_path)
 
-        frame_features: List[Tuple[float, float, float]] = []
+        frame_features: List[Tuple[float, float, float, float]] = []
 
         while capture.isOpened():
             frame_ok, frame = capture.read()

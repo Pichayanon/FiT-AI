@@ -39,36 +39,42 @@ def test_side_indices_return_expected_joint_order() -> None:
 def test_extract_frame_features_returns_expected_wall_sit_values() -> None:
     features = extract_frame_features(build_wall_sit_landmarks(), "right")
 
+    # (foot_wall_norm, knee_angle, torso_alignment, hip_knee_height_ratio)
+    assert len(features) == 4
     np.testing.assert_allclose(
-        features,
+        features[:3],
         np.array([0.5, 90.0, 0.0], dtype=np.float32),
         atol=1e-6,
     )
+    # hip and knee at same y=1.0, so height ratio ≈ 0.0
+    np.testing.assert_allclose(features[3], 0.0, atol=1e-5)
 
 
 def test_aggregate_window_features_returns_expected_statistics() -> None:
     frames = [
-        (0.5, 90.0, 0.0),
-        (1.0, 45.0, 0.5),
+        (0.5, 90.0, 0.0, 0.1),
+        (1.0, 45.0, 0.5, 0.8),
     ]
     aggregated = aggregate_window_features(frames)
 
-    # With exponential weighting, recent frames are weighted more heavily
-    assert aggregated.shape == (5,)
+    # 7 aggregated features now (added hip_knee_height weighted mean + std)
+    assert aggregated.shape == (7,)
     # Weighted mean of foot_wall should be > simple mean (0.75)
-    # because the larger value (1.0) is more recent
     assert aggregated[0] > 0.75
     # std is unweighted, stays the same
     np.testing.assert_allclose(aggregated[1], 0.25, atol=1e-5)
     # Weighted mean of knee_angle should be < simple mean (67.5)
-    # because the smaller value (45.0) is more recent
     assert aggregated[2] < 67.5
     # min is unweighted, stays the same
     np.testing.assert_allclose(aggregated[3], 45.0, atol=1e-5)
+    # Weighted mean of hip_knee_height should be > simple mean (0.45)
+    assert aggregated[5] > 0.45
+    # std of hip_knee_height
+    np.testing.assert_allclose(aggregated[6], np.std([0.1, 0.8]), atol=1e-5)
 
 
 def test_static_aggregate_window_matches_module_function() -> None:
-    frame_values = [(0.5, 90.0, 0.0), (1.0, 45.0, 0.5)]
+    frame_values = [(0.5, 90.0, 0.0, 0.1), (1.0, 45.0, 0.5, 0.8)]
 
     np.testing.assert_allclose(
         WallSitFeatureExtractor.aggregate_window(frame_values),
@@ -80,11 +86,14 @@ def test_wall_sit_feature_extractor_handles_missing_and_present_pose_results() -
     extractor = WallSitFeatureExtractor(mp_pose=object())
 
     assert extractor.extract_features(make_pose_result(None), "right") is None
+    result = extractor.extract_features(make_pose_result(build_wall_sit_landmarks()), "right")
+    assert len(result) == 4
     np.testing.assert_allclose(
-        extractor.extract_features(make_pose_result(build_wall_sit_landmarks()), "right"),
+        result[:3],
         np.array([0.5, 90.0, 0.0], dtype=np.float32),
         atol=1e-6,
     )
+    np.testing.assert_allclose(result[3], 0.0, atol=1e-5)
 
 
 def test_stream_state_starts_with_empty_features_and_defaults() -> None:

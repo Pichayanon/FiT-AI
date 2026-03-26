@@ -63,14 +63,14 @@ def test_wall_sit_pre_buffer_feature_payload_tracks_standing_streak(monkeypatch)
     session.state.chosen_side = "left"
     session.state.ready_streak = 2
 
-    assert session._pre_buffer_feature_payload((0.0, 0.2, 0.0)) is None
+    assert session._pre_buffer_feature_payload((0.0, 0.2, 0.0, 0.0)) is None
     assert session.state.stand_streak == 0
 
-    assert session._pre_buffer_feature_payload((0.0, 0.6, 0.0)) is None
+    assert session._pre_buffer_feature_payload((0.0, 0.6, 0.0, 0.0)) is None
     assert session.state.stand_streak == 1
 
-    session.state.frame_features = [(1.0, 2.0, 3.0)]
-    payload = session._pre_buffer_feature_payload((0.0, 0.7, 0.0))
+    session.state.frame_features = [(1.0, 2.0, 3.0, 0.0)]
+    payload = session._pre_buffer_feature_payload((0.0, 0.7, 0.0, 0.0))
 
     assert payload == {
         "chosen_side": "left",
@@ -84,7 +84,7 @@ def test_wall_sit_pre_buffer_feature_payload_tracks_standing_streak(monkeypatch)
     }
     assert session.state.frame_features == []
 
-    session.state.frame_features = [(1.0, 2.0, 3.0)]
-    next_payload = session._pre_buffer_feature_payload((0.0, 0.8, 0.0))
+    session.state.frame_features = [(1.0, 2.0, 3.0, 0.0)]
+    next_payload = session._pre_buffer_feature_payload((0.0, 0.8, 0.0, 0.0))
     assert next_payload is not None
     assert session.state.frame_features == []

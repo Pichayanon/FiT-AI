@@ -19,7 +19,7 @@ RIGHT_KNEE_INDEX = 26
 LEFT_ANKLE_INDEX = 27
 RIGHT_ANKLE_INDEX = 28
 
-FrameFeatures = tuple[float, float, float]
+FrameFeatures = tuple[float, float, float, float]
 
 
 def side_indices(side: str) -> tuple[int, int, int, int]:
@@ -55,7 +55,13 @@ def extract_frame_features(landmarks: list, side: str) -> FrameFeatures:
     knee_angle = angle_from_points(hip, knee, ankle)
     torso_alignment = abs(shoulder[0] - hip[0])
 
-    return float(foot_wall_norm), float(knee_angle), float(torso_alignment)
+    # How high the hip is relative to the knee (normalized by thigh length).
+    # not_deep_enough → hip is ABOVE knee → high positive value
+    # feet_too_far    → hip is near/below knee → low/negative value
+    thigh_length = np.linalg.norm(np.asarray(hip) - np.asarray(knee)) + 1e-6
+    hip_knee_height_ratio = float((knee[1] - hip[1]) / thigh_length)
+
+    return float(foot_wall_norm), float(knee_angle), float(torso_alignment), hip_knee_height_ratio
 
 
 def _exp_weights(n: int, decay: float = 0.15) -> np.ndarray:
@@ -67,9 +73,10 @@ def _exp_weights(n: int, decay: float = 0.15) -> np.ndarray:
 def aggregate_window_features(
     frame_values: list[FrameFeatures],
 ) -> np.ndarray:
-    foot_wall_values = [foot_wall for foot_wall, _, _ in frame_values]
-    knee_angle_values = [knee_angle for _, knee_angle, _ in frame_values]
-    torso_alignment_values = [torso_align for _, _, torso_align in frame_values]
+    foot_wall_values = [f[0] for f in frame_values]
+    knee_angle_values = [f[1] for f in frame_values]
+    torso_alignment_values = [f[2] for f in frame_values]
+    hip_knee_height_values = [f[3] for f in frame_values]
 
     w = _exp_weights(len(foot_wall_values))
 
@@ -80,6 +87,8 @@ def aggregate_window_features(
             np.average(knee_angle_values, weights=w),
             np.min(knee_angle_values),
             np.average(torso_alignment_values, weights=w),
+            np.average(hip_knee_height_values, weights=w),
+            np.std(hip_knee_height_values),
         ],
         dtype=np.float32,
     )
