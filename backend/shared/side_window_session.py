@@ -49,6 +49,7 @@ class SideWindowSession(BaseWebSocketSession):
         self.status_sender = status_sender
         self.window_frames = int(window_frames)
         self.ready_streak_n = int(ready_streak_n)
+        self.label_streak_n = 8
         self.debug = debug
 
         self.side_mode = side_mode
@@ -122,6 +123,8 @@ class SideWindowSession(BaseWebSocketSession):
         self.state.last_sent_confidence = None
         self.state.last_prediction_label = ""
         self.state.last_prediction_confidence = None
+        self.state.label_streak = 0
+        self.state.label_streak_label = ""
         self.state.frame_count = 0
         self._reset_gate_specific_fields()
 
@@ -332,6 +335,22 @@ class SideWindowSession(BaseWebSocketSession):
 
         self.state.last_prediction_label = pred_label
         self.state.last_prediction_confidence = prediction_confidence
+
+        # Label streak consistency: only emit when same label predicted
+        # N consecutive times, filtering out transitional noise
+        if pred_label == self.state.label_streak_label:
+            self.state.label_streak += 1
+        else:
+            self.state.label_streak_label = pred_label
+            self.state.label_streak = 1
+
+        if self.state.label_streak < self.label_streak_n:
+            if self.debug:
+                print(
+                    f"[PRED] streak={self.state.label_streak}/"
+                    f"{self.label_streak_n} label={pred_label} (buffering)"
+                )
+            return
 
         payload: Dict[str, Any] = {
             "type": "result",

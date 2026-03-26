@@ -126,6 +126,9 @@ class StreamState:
     last_sent_label: str = ""
     last_sent_confidence: Optional[float] = None
 
+    label_streak: int = 0
+    label_streak_label: str = ""
+
     frame_count: int = 0
 
     no_pose_since: Optional[float] = None
