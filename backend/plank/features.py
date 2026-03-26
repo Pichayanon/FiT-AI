@@ -188,6 +188,12 @@ def extract_frame_features(
     return float(hip_signed_dist), float(hip_height_norm), float(body_angle)
 
 
+def _exp_weights(n: int, decay: float = 0.15) -> np.ndarray:
+    """Exponential weights that sum to 1, biased toward the most recent frame."""
+    w = np.exp(decay * np.arange(n))
+    return w / w.sum()
+
+
 def aggregate_window_features(
     frame_values: list[FrameFeatures],
 ) -> np.ndarray:
@@ -195,13 +201,15 @@ def aggregate_window_features(
     hip_height_offsets = [hip_height for _, hip_height, _ in frame_values]
     body_angles = [body_angle for _, _, body_angle in frame_values]
 
+    w = _exp_weights(len(hip_signed_distances))
+
     return np.array(
         [
-            np.mean(hip_signed_distances),
+            np.average(hip_signed_distances, weights=w),
             np.std(hip_signed_distances),
-            np.mean(hip_height_offsets),
+            np.average(hip_height_offsets, weights=w),
             np.std(hip_height_offsets),
-            np.mean(body_angles),
+            np.average(body_angles, weights=w),
             np.std(body_angles),
         ],
         dtype=np.float32,

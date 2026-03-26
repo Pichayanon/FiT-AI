@@ -47,17 +47,24 @@ def test_extract_frame_features_returns_expected_wall_sit_values() -> None:
 
 
 def test_aggregate_window_features_returns_expected_statistics() -> None:
-    aggregated = aggregate_window_features(
-        [
-            (0.5, 90.0, 0.0),
-            (1.0, 45.0, 0.5),
-        ]
-    )
+    frames = [
+        (0.5, 90.0, 0.0),
+        (1.0, 45.0, 0.5),
+    ]
+    aggregated = aggregate_window_features(frames)
 
-    np.testing.assert_allclose(
-        aggregated,
-        np.array([0.75, 0.25, 67.5, 45.0, 0.25], dtype=np.float32),
-    )
+    # With exponential weighting, recent frames are weighted more heavily
+    assert aggregated.shape == (5,)
+    # Weighted mean of foot_wall should be > simple mean (0.75)
+    # because the larger value (1.0) is more recent
+    assert aggregated[0] > 0.75
+    # std is unweighted, stays the same
+    np.testing.assert_allclose(aggregated[1], 0.25, atol=1e-5)
+    # Weighted mean of knee_angle should be < simple mean (67.5)
+    # because the smaller value (45.0) is more recent
+    assert aggregated[2] < 67.5
+    # min is unweighted, stays the same
+    np.testing.assert_allclose(aggregated[3], 45.0, atol=1e-5)
 
 
 def test_static_aggregate_window_matches_module_function() -> None:

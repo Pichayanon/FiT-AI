@@ -58,6 +58,12 @@ def extract_frame_features(landmarks: list, side: str) -> FrameFeatures:
     return float(foot_wall_norm), float(knee_angle), float(torso_alignment)
 
 
+def _exp_weights(n: int, decay: float = 0.15) -> np.ndarray:
+    """Exponential weights that sum to 1, biased toward the most recent frame."""
+    w = np.exp(decay * np.arange(n))
+    return w / w.sum()
+
+
 def aggregate_window_features(
     frame_values: list[FrameFeatures],
 ) -> np.ndarray:
@@ -65,13 +71,15 @@ def aggregate_window_features(
     knee_angle_values = [knee_angle for _, knee_angle, _ in frame_values]
     torso_alignment_values = [torso_align for _, _, torso_align in frame_values]
 
+    w = _exp_weights(len(foot_wall_values))
+
     return np.array(
         [
-            np.mean(foot_wall_values),
+            np.average(foot_wall_values, weights=w),
             np.std(foot_wall_values),
-            np.mean(knee_angle_values),
+            np.average(knee_angle_values, weights=w),
             np.min(knee_angle_values),
-            np.mean(torso_alignment_values),
+            np.average(torso_alignment_values, weights=w),
         ],
         dtype=np.float32,
     )

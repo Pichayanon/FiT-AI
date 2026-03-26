@@ -43,7 +43,7 @@ LABELS: Dict[int, str] = {
     4: "not_deep_enough",
 }
 
-WINDOW_FRAMES = 45
+WINDOW_FRAMES = 20
 READY_STREAK_N = 3
 VIS_TH = 0.80
 

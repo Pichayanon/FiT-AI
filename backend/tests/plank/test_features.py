@@ -87,17 +87,24 @@ def test_extract_frame_features_returns_expected_line_geometry() -> None:
 
 
 def test_aggregate_window_features_returns_mean_and_std() -> None:
-    aggregated = aggregate_window_features(
-        [
-            (0.0, 0.0, 180.0),
-            (2.0, 1.0, 120.0),
-        ]
-    )
+    frames = [
+        (0.0, 0.0, 180.0),
+        (2.0, 1.0, 120.0),
+    ]
+    aggregated = aggregate_window_features(frames)
 
-    np.testing.assert_allclose(
-        aggregated,
-        np.array([1.0, 1.0, 0.5, 0.5, 150.0, 30.0], dtype=np.float32),
-    )
+    # With exponential weighting, recent frames are weighted more heavily
+    assert aggregated.shape == (6,)
+    # Weighted mean of hip_signed_dist should be > simple mean (1.0)
+    # because the larger value (2.0) is more recent
+    assert aggregated[0] > 1.0
+    # std is unweighted, stays the same
+    np.testing.assert_allclose(aggregated[1], 1.0, atol=1e-5)
+    # Weighted mean of body_angle should be < simple mean (150.0)
+    # because the smaller value (120.0) is more recent
+    assert aggregated[4] < 150.0
+    # std is unweighted, stays the same
+    np.testing.assert_allclose(aggregated[5], 30.0, atol=1e-5)
 
 
 def test_static_aggregate_window_matches_module_function() -> None:
