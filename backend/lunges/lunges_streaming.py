@@ -48,7 +48,7 @@ DARK_BRIGHTNESS_TH = 55.0
 
 GOAL_GOOD_REPS = 5
 
-DEBUG = False
+DEBUG = True
 
 pose_module = mp.solutions.pose
 
