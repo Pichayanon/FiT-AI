@@ -156,6 +156,10 @@ class SideWindowSession(BaseWebSocketSession):
     ) -> Optional[Dict[str, Any]]:
         return None
 
+    def _correct_min_confidence(self) -> float:
+        """Minimum confidence to accept a 'correct' prediction. Override in subclass."""
+        return 0.0
+
     def _on_missing_features(self) -> None:
         pass
 
@@ -332,6 +336,17 @@ class SideWindowSession(BaseWebSocketSession):
             aggregated_features
         )
         pred_label = self.labels.label_of(predicted_id)
+
+        # If "correct" but confidence too low, downgrade to last known issue
+        if pred_label == "correct" and prediction_confidence is not None:
+            min_conf = self._correct_min_confidence()
+            if prediction_confidence < min_conf:
+                if self.debug:
+                    print(
+                        f"[PRED] correct confidence {prediction_confidence:.3f} "
+                        f"< {min_conf}, suppressed"
+                    )
+                return
 
         self.state.last_prediction_label = pred_label
         self.state.last_prediction_confidence = prediction_confidence

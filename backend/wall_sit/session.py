@@ -69,6 +69,9 @@ class WallSitWebSocketSession(SideWindowSession):
     def _create_state(self) -> StreamState:
         return StreamState()
 
+    def _correct_min_confidence(self) -> float:
+        return 0.5
+
     def _reset_gate_specific_fields(self) -> None:
         self.state.stand_streak = 0
 

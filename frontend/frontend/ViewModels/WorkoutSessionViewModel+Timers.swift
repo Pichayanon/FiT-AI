@@ -8,8 +8,8 @@ extension WorkoutSessionViewModel {
 
         let now = Date()
         if let reminderSince = wallSitNeedsStartSince,
-           now.timeIntervalSince(reminderSince) >= 1.0,
-           now.timeIntervalSince(lastWallSitStartReminderAt) >= 1.0 {
+           now.timeIntervalSince(reminderSince) >= 5.0,
+           now.timeIntervalSince(lastWallSitStartReminderAt) >= 5.0 {
             speech.speak(
                 "Please start wall sit",
                 language: speechLang,
