@@ -103,6 +103,8 @@ class DummySideState:
     last_sent_confidence: float | None = None
     last_prediction_label: str = ""
     last_prediction_confidence: float | None = None
+    label_streak: int = 0
+    label_streak_label: str = ""
     frame_count: int = 0
     no_pose_since: float | None = None
     no_pose_alerted: bool = False
@@ -350,6 +352,9 @@ async def test_side_window_inference_sends_result_and_trims_window(monkeypatch) 
     session.state.ready = True
     session.state.chosen_side = "left"
     session.state.frame_features = [(0.0, 0.0, 0.0)] * 62
+    # Pre-fill label streak so prediction is emitted on this frame
+    session.state.label_streak_label = "good"
+    session.state.label_streak = session.label_streak_n - 1
 
     await session._handle_frame({"jpeg_b64": "frame"})
 
