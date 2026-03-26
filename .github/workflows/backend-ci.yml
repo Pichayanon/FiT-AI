@@ -180,4 +180,4 @@ jobs:
           git lfs track "*.pt" "*.pkl"
           git add .
           git commit -m "Deploy from ${{ github.sha }}"
-          git push --force "https://Nuafah:${HF_TOKEN}@huggingface.co/spaces/Nuafah/fit-ai-ml" main
+          git push --force "https://Pichayanon:${HF_TOKEN}@huggingface.co/spaces/Pichayanon/fit-ai" main
